@@ -12,9 +12,13 @@ Writes scripts/pr_report/pr_report.html with a styled HTML dashboard and
 scripts/pr_report/github_mentions.txt with GitHub usernames for @mentions.
 """
 
+<<<<<<< HEAD
 import base64
 import html
 import io
+=======
+import html
+>>>>>>> 95524d9 (PR report (#867))
 import json
 import os
 import sys
@@ -22,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+<<<<<<< HEAD
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +34,10 @@ import matplotlib
 
 matplotlib.use("Agg")  # Non-interactive backend — must be set before importing pyplot
 import matplotlib.pyplot as plt
+=======
+from datetime import datetime, timezone
+from pathlib import Path
+>>>>>>> 95524d9 (PR report (#867))
 
 API = "https://api.github.com"
 ACCEPT = "application/vnd.github+json"
@@ -265,6 +274,7 @@ def classify_check_runs(check_runs):
 
 def fetch_recent_closed_prs(owner, repo, token, days=10):
     """
+<<<<<<< HEAD
     Fetch PRs that were closed (merged or not) within the last `days` days.
     Uses the GitHub search API to find PRs closed in the date range.
     Returns a list of PR dicts (lightweight — only fields available in list endpoint).
@@ -411,6 +421,10 @@ def build_author_color_map(author_counts):
     """
     Build a consistent color mapping for authors based on their PR counts.
     Returns a dict {author: hex_color}.
+=======
+    Generate a self-contained inline SVG pie chart showing PR distribution
+    by author.  Returns an HTML string (a <div> wrapping an <svg>).
+>>>>>>> 95524d9 (PR report (#867))
     """
     if not author_counts:
         return {}
@@ -453,12 +467,34 @@ def build_author_color_map(author_counts):
 _LEFT_CHART_HW_RATIO = 35 * 8 / (12 * 2 * 65)  # ≈ 0.1795
 _LEFT_CHART_HEIGHT_MIN = 3.5  # inches
 
+<<<<<<< HEAD
 # Single accent colors — professional, no per-author rainbow
 _COLOR_PENDING = "#2c6fad"  # corporate blue  — non-draft bars
 _COLOR_DRAFT = "#e07b39"  # burnt orange    — draft bars
 _COLOR_AVG = "#2c6fad"  # corporate blue  — avg-age bar
 _COLOR_MAX_EXT = "#8ab4d4"  # light steel blue — max-age extension
 
+=======
+        # SVG arc path: move to centre → line to arc start → arc → close
+        path = f"M {cx},{cy} L {x1:.2f},{y1:.2f} A {r},{r} 0 {large_arc},1 {x2:.2f},{y2:.2f} Z"
+        paths_svg += (
+            f'  <path d="{path}" fill="{color}" '
+            f'stroke="white" stroke-width="2">\n'
+            f"    <title>{html.escape(author)}: {count} PR{'s' if count != 1 else ''} ({pct:.1f}%)</title>\n"
+            f"  </path>\n"
+        )
+
+        # Legend row
+        ly = 40 + i * row_h
+        legend_svg += (
+            f'  <rect x="{legend_x}" y="{ly}" width="14" height="14" '
+            f'fill="{color}" rx="2"/>\n'
+            f'  <text x="{legend_x + 20}" y="{ly + 11}" '
+            f'font-size="12" font-family="Arial, sans-serif" fill="#333">'
+            f"{html.escape(author)}  {count} PR{'s' if count != 1 else ''}  ({pct:.1f}%)"
+            f"</text>\n"
+        )
+>>>>>>> 95524d9 (PR report (#867))
 
 def generate_pending_pr_count_chart_png(
     pending_age_data, color_map, draft_prs_per_author=None, sorted_authors=None, png_path=None
@@ -467,6 +503,7 @@ def generate_pending_pr_count_chart_png(
     Generate a stacked vertical bar chart showing total pending PRs and draft PRs
     per author.
 
+<<<<<<< HEAD
     Each bar shows:
         - Bottom segment: non-draft (ready) PRs  (corporate blue)
         - Top segment:    draft PRs               (burnt orange)
@@ -607,9 +644,29 @@ def generate_pending_pr_count_chart_png(
         f'alt="Pending PRs by Author" '
         f'style="max-width:100%;height:auto;display:block;">\n'
         f"</div>\n"
+=======
+    # ── Assemble SVG ─────────────────────────────────────────────────────────
+    svg = (
+        f'<div class="chart-container">\n'
+        f'<svg width="{svg_w}" height="{svg_h}" '
+        f'xmlns="http://www.w3.org/2000/svg" '
+        f'style="font-family:Arial,sans-serif;">\n'
+        # Chart title
+        f'  <text x="{cx}" y="20" text-anchor="middle" '
+        f'font-size="14" font-weight="bold" fill="#1a1a2e">'
+        f"PR Distribution by Author (Total: {total})</text>\n"
+        # Slices
+        + paths_svg
+        # Legend header
+        + f'  <text x="{legend_x}" y="22" font-size="13" '
+        f'font-weight="bold" fill="#1a1a2e">Author</text>\n'
+        # Legend rows
+         + legend_svg + "</svg>\n</div>\n"
+>>>>>>> 95524d9 (PR report (#867))
     )
 
 
+<<<<<<< HEAD
 # ── PR age chart helper ───────────────────────────────────────────────────────
 
 
@@ -1183,6 +1240,257 @@ def load_github_usernames():
     Load email-to-GitHub-username mapping from email_map.json.
     Returns a list of GitHub usernames to @mention in the issue.
     """
+=======
+# ── HTML rendering helpers ────────────────────────────────────────────────────
+
+
+def ci_badge(name, state):
+    """Return an HTML badge <span> for a single CI check run."""
+    colors = {
+        "PASS": ("#1a7f37", "#dafbe1"),  # dark-green text, light-green bg
+        "FAIL": ("#cf222e", "#ffebe9"),  # red text, light-red bg
+        "PENDING": ("#9a6700", "#fff8c5"),  # amber text, light-yellow bg
+    }
+    text_color, bg_color = colors.get(state, ("#24292e", "#f6f8fa"))
+    safe_name = html.escape(name)
+    safe_state = html.escape(state)
+    return f'<span class="badge" style="color:{text_color};background:{bg_color};">{safe_name}: {safe_state}</span>'
+
+
+def review_badge(label, users, text_color, bg_color):
+    """Return an HTML badge group for a review category."""
+    if not users:
+        return ""
+    safe_label = html.escape(label)
+    safe_users = html.escape(", ".join(users))
+    return (
+        f'<div class="review-group">'
+        f'<span class="badge" style="color:{text_color};background:{bg_color};">'
+        f"{safe_label}</span> "
+        f'<span class="review-users">{safe_users}</span>'
+        f"</div>"
+    )
+
+
+def build_html(repo_full, date_str, total_open, pie_svg, rows_html):
+    """Assemble the complete HTML document."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Open PR Dashboard — {html.escape(repo_full)}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                   Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
+      line-height: 1.6;
+      color: #24292e;
+      background: #f6f8fa;
+      padding: 24px;
+    }}
+
+    .container {{
+      max-width: 1500px;
+      margin: 0 auto;
+      background: #fff;
+      padding: 32px 36px;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+    }}
+
+    h1 {{
+      font-size: 1.75em;
+      color: #1a1a2e;
+      border-bottom: 3px solid #0366d6;
+      padding-bottom: 10px;
+      margin-bottom: 20px;
+    }}
+
+    /* ── Summary table ── */
+    .summary-table {{
+      border-collapse: collapse;
+      margin-bottom: 24px;
+    }}
+    .summary-table td {{
+      padding: 6px 16px 6px 0;
+      font-size: 0.95em;
+    }}
+    .summary-table td:first-child {{
+      font-weight: 600;
+      color: #586069;
+      padding-right: 12px;
+    }}
+
+    /* ── Pie chart ── */
+    .chart-container {{
+      margin: 24px 0;
+      overflow-x: auto;
+    }}
+
+    /* ── PR table ── */
+    .pr-table-wrapper {{
+      overflow-x: auto;
+      margin-top: 24px;
+    }}
+
+    table.pr-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875em;
+    }}
+
+    table.pr-table thead {{
+      background: #f6f8fa;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }}
+
+    table.pr-table th {{
+      padding: 10px 10px;
+      text-align: left;
+      font-weight: 600;
+      color: #24292e;
+      border-bottom: 2px solid #d1d5da;
+      white-space: nowrap;
+    }}
+
+    table.pr-table th.num {{ text-align: right; }}
+
+    table.pr-table td {{
+      padding: 9px 10px;
+      border-bottom: 1px solid #e1e4e8;
+      vertical-align: top;
+    }}
+
+    table.pr-table tbody tr:hover {{ background: #f6f8fa; }}
+
+    td.age {{ text-align: right; font-variant-numeric: tabular-nums; }}
+
+    td.draft-yes {{ color: #9a6700; font-weight: 600; }}
+    td.draft-no  {{ color: #57606a; }}
+
+    a {{ color: #0366d6; text-decoration: none; }}
+    a:hover {{ text-decoration: underline; }}
+
+    .pr-link {{ font-weight: 600; }}
+
+    /* ── Badges ── */
+    .badge {{
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 12px;
+      font-size: 0.78em;
+      font-weight: 600;
+      white-space: nowrap;
+      margin: 1px 2px 1px 0;
+    }}
+
+    /* ── CI checks cell ── */
+    td.ci-cell {{
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 0.8em;
+    }}
+    td.ci-cell .badge {{ font-family: inherit; }}
+
+    /* ── Review summary cell ── */
+    .review-group {{
+      margin-bottom: 3px;
+    }}
+    .review-users {{
+      font-size: 0.9em;
+      color: #57606a;
+    }}
+
+    /* ── No-data row ── */
+    .no-data {{
+      text-align: center;
+      color: #57606a;
+      padding: 24px;
+      font-style: italic;
+    }}
+
+    /* ── Footer ── */
+    .footer {{
+      margin-top: 32px;
+      font-size: 0.8em;
+      color: #8b949e;
+      text-align: right;
+    }}
+
+    @media (max-width: 900px) {{
+      .container {{ padding: 16px; }}
+      table.pr-table {{ font-size: 0.8em; }}
+      table.pr-table th, table.pr-table td {{ padding: 7px 6px; }}
+    }}
+
+    @media print {{
+      body {{ background: #fff; }}
+      .container {{ box-shadow: none; }}
+      table.pr-table {{ page-break-inside: auto; }}
+      tr {{ page-break-inside: avoid; }}
+    }}
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Open PR Dashboard — {html.escape(repo_full)}</h1>
+
+  <table class="summary-table">
+    <tr>
+      <td>Report Date</td>
+      <td>{html.escape(date_str)}</td>
+    </tr>
+    <tr>
+      <td>Open PRs</td>
+      <td><strong>{total_open}</strong></td>
+    </tr>
+  </table>
+
+  {pie_svg}
+
+  <div class="pr-table-wrapper">
+    <table class="pr-table">
+      <thead>
+        <tr>
+          <th>PR</th>
+          <th>Author</th>
+          <th>Assignee</th>
+          <th class="num">Age (days)</th>
+          <th>Draft</th>
+          <th>Labels</th>
+          <th>Reviewers</th>
+          <th>Pending With</th>
+          <th>Review Summary</th>
+          <th>CI Checks</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows_html if rows_html else '<tr><td colspan="10" class="no-data">No open pull requests.</td></tr>'}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="footer">Generated by pr_dashboard.py · {html.escape(date_str)}</div>
+
+</div>
+</body>
+</html>"""
+
+
+# ── Email/Username mapping ───────────────────────────────────────────────────
+
+
+def load_github_usernames():
+    """
+    Load email-to-GitHub-username mapping from email_map.json.
+    Returns a list of GitHub usernames to @mention in the issue.
+    """
+>>>>>>> 95524d9 (PR report (#867))
     script_dir = Path(__file__).parent
     email_map_file = os.environ.get("EMAIL_MAP_FILE", script_dir / "email_map.json")
 
@@ -1297,6 +1605,7 @@ def main():
         if not is_bot(author):
             author_counts[author] = author_counts.get(author, 0) + 1
 
+<<<<<<< HEAD
     # Build shared color map (used by age bar chart)
     color_map = build_author_color_map(author_counts)
 
@@ -1314,6 +1623,12 @@ def main():
     row_parts = []
     pending_age_data: dict = {}  # {author: [age1, age2, ...]}
     draft_prs_per_author: dict = {}  # {author: [pr_number, ...]}
+=======
+    pie_svg = generate_pie_chart_svg(author_counts)
+
+    # -- Build PR table rows --------------------------------------------------
+    row_parts = []
+>>>>>>> 95524d9 (PR report (#867))
 
     for pr in pulls:
         number = pr["number"]
@@ -1340,6 +1655,10 @@ def main():
         assignees = [u["login"] for u in pr.get("assignees") or [] if not is_bot(u["login"])]
         assignee_str = html.escape(", ".join(assignees)) if assignees else "—"
 
+<<<<<<< HEAD
+=======
+        # Labels (already in PR payload — no extra API call)
+>>>>>>> 95524d9 (PR report (#867))
         labels = [lbl["name"] for lbl in pr.get("labels") or []]
         labels_html = (
             " ".join(
@@ -1370,10 +1689,16 @@ def main():
         review_summary_html = "\n".join(review_html_parts) if review_html_parts else "<em>No reviews yet</em>"
 
         # Pending With — smart assignment based on PR state
+<<<<<<< HEAD
         pending_with_raw = determine_pending_with(pr, reviews, rs, requested_reviewers)
         pending_with_str = html.escape(pending_with_raw)
 
         # CI check runs — fully paginated
+=======
+        pending_with_str = html.escape(determine_pending_with(pr, reviews, rs, requested_reviewers))
+
+        # 4) Individual CI check runs — fully paginated
+>>>>>>> 95524d9 (PR report (#867))
         ci_html = '<span style="color:#57606a;">UNKNOWN</span>'
         if head_sha:
             check_runs = paginate_check_runs(
@@ -1411,6 +1736,7 @@ def main():
 
     rows_html = "\n        ".join(row_parts)
 
+<<<<<<< HEAD
     # -- Two left-column charts (share the same sorted x-axis) ----------------
     # Sort authors by total PR count descending — used by both charts
     sorted_authors = sorted(
@@ -1453,6 +1779,13 @@ def main():
         merged_7d=merged_7d,
         closed_7d=closed_7d,
     )
+=======
+    # -- Write HTML file ------------------------------------------------------
+    script_dir = Path(__file__).parent
+    html_file = script_dir / "pr_report.html"
+
+    html_content = build_html(repo_full, date_str, total_open, pie_svg, rows_html)
+>>>>>>> 95524d9 (PR report (#867))
 
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
