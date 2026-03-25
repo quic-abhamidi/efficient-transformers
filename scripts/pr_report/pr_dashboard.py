@@ -12,19 +12,9 @@ Writes scripts/pr_report/pr_report.html with a styled HTML dashboard and
 scripts/pr_report/github_mentions.txt with GitHub usernames for @mentions.
 """
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 import base64
 import html
 import io
-=======
-import html
->>>>>>> 95524d9 (PR report (#867))
-=======
-import base64
-import html
-import io
->>>>>>> f668b40 (PR report (#877))
 import json
 import os
 import sys
@@ -32,22 +22,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-<<<<<<< HEAD
-<<<<<<< HEAD
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import matplotlib
-
-matplotlib.use("Agg")  # Non-interactive backend — must be set before importing pyplot
-import matplotlib.pyplot as plt
-=======
-from datetime import datetime, timezone
-=======
-from datetime import datetime, timedelta, timezone
->>>>>>> f668b40 (PR report (#877))
-from pathlib import Path
->>>>>>> 95524d9 (PR report (#867))
 
 import matplotlib
 
@@ -289,10 +265,6 @@ def classify_check_runs(check_runs):
 
 def fetch_recent_closed_prs(owner, repo, token, days=10):
     """
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> f668b40 (PR report (#877))
     Fetch PRs that were closed (merged or not) within the last `days` days.
     Uses the GitHub search API to find PRs closed in the date range.
     Returns a list of PR dicts (lightweight — only fields available in list endpoint).
@@ -439,13 +411,6 @@ def build_author_color_map(author_counts):
     """
     Build a consistent color mapping for authors based on their PR counts.
     Returns a dict {author: hex_color}.
-<<<<<<< HEAD
-=======
-    Generate a self-contained inline SVG pie chart showing PR distribution
-    by author.  Returns an HTML string (a <div> wrapping an <svg>).
->>>>>>> 95524d9 (PR report (#867))
-=======
->>>>>>> f668b40 (PR report (#877))
     """
     if not author_counts:
         return {}
@@ -488,41 +453,12 @@ def build_author_color_map(author_counts):
 _LEFT_CHART_HW_RATIO = 35 * 8 / (12 * 2 * 65)  # ≈ 0.1795
 _LEFT_CHART_HEIGHT_MIN = 3.5  # inches
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> f668b40 (PR report (#877))
 # Single accent colors — professional, no per-author rainbow
 _COLOR_PENDING = "#2c6fad"  # corporate blue  — non-draft bars
 _COLOR_DRAFT = "#e07b39"  # burnt orange    — draft bars
 _COLOR_AVG = "#2c6fad"  # corporate blue  — avg-age bar
 _COLOR_MAX_EXT = "#8ab4d4"  # light steel blue — max-age extension
-<<<<<<< HEAD
 
-=======
-        # SVG arc path: move to centre → line to arc start → arc → close
-        path = f"M {cx},{cy} L {x1:.2f},{y1:.2f} A {r},{r} 0 {large_arc},1 {x2:.2f},{y2:.2f} Z"
-        paths_svg += (
-            f'  <path d="{path}" fill="{color}" '
-            f'stroke="white" stroke-width="2">\n'
-            f"    <title>{html.escape(author)}: {count} PR{'s' if count != 1 else ''} ({pct:.1f}%)</title>\n"
-            f"  </path>\n"
-        )
-
-        # Legend row
-        ly = 40 + i * row_h
-        legend_svg += (
-            f'  <rect x="{legend_x}" y="{ly}" width="14" height="14" '
-            f'fill="{color}" rx="2"/>\n'
-            f'  <text x="{legend_x + 20}" y="{ly + 11}" '
-            f'font-size="12" font-family="Arial, sans-serif" fill="#333">'
-            f"{html.escape(author)}  {count} PR{'s' if count != 1 else ''}  ({pct:.1f}%)"
-            f"</text>\n"
-        )
->>>>>>> 95524d9 (PR report (#867))
-=======
-
->>>>>>> f668b40 (PR report (#877))
 
 def generate_pending_pr_count_chart_png(
     pending_age_data, color_map, draft_prs_per_author=None, sorted_authors=None, png_path=None
@@ -531,10 +467,6 @@ def generate_pending_pr_count_chart_png(
     Generate a stacked vertical bar chart showing total pending PRs and draft PRs
     per author.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> f668b40 (PR report (#877))
     Each bar shows:
         - Bottom segment: non-draft (ready) PRs  (corporate blue)
         - Top segment:    draft PRs               (burnt orange)
@@ -675,278 +607,9 @@ def generate_pending_pr_count_chart_png(
         f'alt="Pending PRs by Author" '
         f'style="max-width:100%;height:auto;display:block;">\n'
         f"</div>\n"
-<<<<<<< HEAD
-=======
-    # ── Assemble SVG ─────────────────────────────────────────────────────────
-    svg = (
-        f'<div class="chart-container">\n'
-        f'<svg width="{svg_w}" height="{svg_h}" '
-        f'xmlns="http://www.w3.org/2000/svg" '
-        f'style="font-family:Arial,sans-serif;">\n'
-        # Chart title
-        f'  <text x="{cx}" y="20" text-anchor="middle" '
-        f'font-size="14" font-weight="bold" fill="#1a1a2e">'
-        f"PR Distribution by Author (Total: {total})</text>\n"
-        # Slices
-        + paths_svg
-        # Legend header
-        + f'  <text x="{legend_x}" y="22" font-size="13" '
-        f'font-weight="bold" fill="#1a1a2e">Author</text>\n'
-        # Legend rows
-         + legend_svg + "</svg>\n</div>\n"
->>>>>>> 95524d9 (PR report (#867))
-=======
     )
 
 
-# ── PR age chart helper ───────────────────────────────────────────────────────
-
-
-def generate_pr_age_chart_png(pending_age_data, color_map, sorted_authors=None, png_path=None):
-    """
-    Generate a stacked bar chart showing avg and max PR age per author.
-
-    Each bar shows (same stacked pattern as the pending-PR count chart):
-        - Bottom segment: avg age  (corporate blue)
-        - Top segment:    max - avg extension  (light steel blue)
-
-    Annotations: avg value inside the avg segment, max value above the full bar.
-    All bars share the same two-color scheme (no per-author rainbow).
-    Figure size matches the pending-PR chart for visual alignment.
-
-    Args:
-        pending_age_data: dict {author: [age1, age2, ...]}
-        color_map:        unused (kept for API compatibility)
-        sorted_authors:   pre-sorted author list for shared x-axis
-        png_path:         optional Path to save PNG file
-
-    Returns:
-        HTML string with embedded base64 image
-    """
-    if not pending_age_data:
-        return ""
-
-    # Build stats list
-    stats = []
-    for person, ages in pending_age_data.items():
-        if ages:
-            stats.append(
-                {
-                    "person": person,
-                    "avg": sum(ages) / len(ages),
-                    "max": max(ages),
-                    "count": len(ages),
-                }
-            )
-
-    if not stats:
-        return ""
-
-    # Use provided sorted order or sort by count descending
-    if sorted_authors is not None:
-        order = {a: i for i, a in enumerate(sorted_authors)}
-        stats.sort(key=lambda x: order.get(x["person"], 9999))
-    else:
-        stats.sort(key=lambda x: -x["count"])
-
-    n = len(stats)
-    avgs = [s["avg"] for s in stats]
-    maxs = [s["max"] for s in stats]
-    exts = [max(0, mx - avg) for avg, mx in zip(avgs, maxs)]  # max extension above avg
-
-    # Figure size: same width formula as pending chart for aligned rendering
-    fig_w = max(12, n * 1.1)
-    fig_h = max(_LEFT_CHART_HEIGHT_MIN, fig_w * _LEFT_CHART_HW_RATIO)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-    Y_CAP = 200  # y-axis cap (days)
-    bar_w = 0.55
-    x_pos = range(n)
-
-    avgs_plot = [min(a, Y_CAP) for a in avgs]
-    exts_plot = [min(e, Y_CAP - a_p) for e, a_p in zip(exts, avgs_plot)]
-
-    # Stacked bars: avg (bottom) + max extension (top)
-    ax.bar(
-        x_pos,
-        avgs_plot,
-        color=_COLOR_AVG,
-        alpha=0.90,
-        edgecolor="white",
-        linewidth=1.0,
-        width=bar_w,
-        label="Avg age",
-        zorder=2,
-    )
-    ax.bar(
-        x_pos,
-        exts_plot,
-        bottom=avgs_plot,
-        color=_COLOR_MAX_EXT,
-        alpha=0.90,
-        edgecolor="white",
-        linewidth=1.0,
-        width=bar_w,
-        label="Max age (extension)",
-        zorder=2,
-    )
-
-    # Annotate avg inside bar and max above full bar
-    for i, (avg, mx, a_p, e_p) in enumerate(zip(avgs, maxs, avgs_plot, exts_plot)):
-        full_h = a_p + e_p
-        # avg label inside avg segment
-        if a_p > Y_CAP * 0.10:
-            ax.text(
-                i,
-                a_p * 0.5,
-                f"avg\n{avg:.0f}d",
-                ha="center",
-                va="center",
-                fontsize=8,
-                fontweight="bold",
-                color="white",
-                zorder=4,
-            )
-        else:
-            ax.text(
-                i,
-                a_p + Y_CAP * 0.015,
-                f"{avg:.0f}d",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                fontweight="bold",
-                color="#1a1a2e",
-                zorder=4,
-            )
-        # max label above full bar
-        y_label = min(full_h + Y_CAP * 0.025, Y_CAP * 0.96)
-        ax.text(
-            i,
-            y_label,
-            f"max {int(mx)}d",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-            color="#1a1a2e",
-            fontweight="bold",
-            zorder=4,
-        )
-
-    ax.set_xticks(list(x_pos))
-    ax.set_xticklabels(
-        [s["person"] for s in stats],
-        fontsize=12,
-        ha="right",
-        rotation=30,
-    )
-    ax.set_ylabel("PR Age (days)", fontsize=13, fontweight="bold", color="#1a1a2e")
-    ax.tick_params(axis="y", labelsize=11)
-    ax.set_title("PR Age by Author  (avg & max)", fontsize=14, fontweight="bold", pad=10, color="#1a1a2e", loc="left")
-    ax.set_xlim(-0.6, n - 0.4)
-    ax.set_ylim(bottom=0, top=Y_CAP)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-    ax.legend(fontsize=10, framealpha=0.85, loc="upper right")
-    ax.grid(True, axis="y", linestyle="--", alpha=0.4)
-    ax.set_facecolor("#f8f9fb")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    plt.tight_layout()
-
-    # ── Save PNG file ─────────────────────────────────────────────────────────
-    if png_path is not None:
-        fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
-        print(f"Saved PR age chart PNG to {png_path}", file=sys.stderr)
-
-    # ── Encode as base64 for inline embedding ─────────────────────────────────
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-
-    return (
-        f'<div class="age-chart-container">\n'
-        f'<img src="data:image/png;base64,{img_b64}" '
-        f'alt="PR Age by Author" '
-        f'style="max-width:100%;height:auto;display:block;">\n'
-        f"</div>\n"
-    )
-
-
-# ── Pie chart helper ──────────────────────────────────────────────────────────
-
-
-def generate_pie_chart_png(author_counts, color_map, png_path=None):
-    """
-    Generate a pie chart as a PNG using matplotlib.
-
-    Saves the PNG to png_path (a Path or str) if provided.
-    Returns an HTML string: a <div> wrapping an <img> with the chart
-    embedded as a base64 data URI — supported by all major email clients
-    (Gmail, Outlook web, Apple Mail, etc.), unlike inline SVG which is
-    stripped by email clients for security reasons.
-    """
-    if not author_counts:
-        return ""
-
-    # Sort by count descending so the largest slice starts at the top
-    items = sorted(author_counts.items(), key=lambda x: -x[1])
-    sizes = [count for _, count in items]
-    total = sum(sizes)
-
-    # Use colors from the color_map
-    chart_colors = [color_map.get(author, "#cccccc") for author, _ in items]
-
-    fig, ax = plt.subplots(figsize=(7, 6))
-
-    wedges, _, autotexts = ax.pie(
-        sizes,
-        colors=chart_colors,
-        autopct=lambda pct: f"{pct:.1f}%" if pct >= 3 else "",
-        startangle=90,
-        wedgeprops={"edgecolor": "white", "linewidth": 2},
-        pctdistance=0.78,
-    )
-    for at in autotexts:
-        at.set_fontsize(8)
-        at.set_color("white")
-        at.set_fontweight("bold")
-
-    ax.set_title(
-        f"PR Distribution by Author (Total: {total})",
-        fontsize=12,
-        fontweight="bold",
-        pad=15,
-        color="#1a1a2e",
-    )
-
-    plt.tight_layout()
-
-    # ── Save PNG file (used by Jenkins archiveArtifacts) ─────────────────────
-    if png_path is not None:
-        fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
-        print(f"Saved pie chart PNG to {png_path}", file=sys.stderr)
-
-    # ── Encode as base64 for inline embedding in HTML ────────────────────────
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-
-    return (
-        f'<div class="chart-container">\n'
-        f'<img src="data:image/png;base64,{img_b64}" '
-        f'alt="PR Distribution by Author" '
-        f'style="max-width:100%;height:auto;">\n'
-        f"</div>\n"
->>>>>>> f668b40 (PR report (#877))
-    )
-
-
-<<<<<<< HEAD
 # ── PR age chart helper ───────────────────────────────────────────────────────
 
 
@@ -1520,335 +1183,6 @@ def load_github_usernames():
     Load email-to-GitHub-username mapping from email_map.json.
     Returns a list of GitHub usernames to @mention in the issue.
     """
-=======
-# ── HTML rendering helpers ────────────────────────────────────────────────────
-
-
-def ci_badge(name, state):
-    """Return an HTML badge <span> for a single CI check run."""
-    colors = {
-        "PASS": ("#1a7f37", "#dafbe1"),  # dark-green text, light-green bg
-        "FAIL": ("#cf222e", "#ffebe9"),  # red text, light-red bg
-        "PENDING": ("#9a6700", "#fff8c5"),  # amber text, light-yellow bg
-    }
-    text_color, bg_color = colors.get(state, ("#24292e", "#f6f8fa"))
-    safe_name = html.escape(name)
-    safe_state = html.escape(state)
-    return f'<span class="badge" style="color:{text_color};background:{bg_color};">{safe_name}: {safe_state}</span>'
-
-
-def review_badge(label, users, text_color, bg_color):
-    """Return an HTML badge group for a review category."""
-    if not users:
-        return ""
-    safe_label = html.escape(label)
-    safe_users = html.escape(", ".join(users))
-    return (
-        f'<div class="review-group">'
-        f'<span class="badge" style="color:{text_color};background:{bg_color};">'
-        f"{safe_label}</span> "
-        f'<span class="review-users">{safe_users}</span>'
-        f"</div>"
-    )
-
-
-def build_html(
-    repo_full,
-    date_str,
-    total_open,
-    age_chart_html,
-    trend_chart_html,
-    rows_html,
-    draft_count=0,
-    opened_7d=0,
-    merged_7d=0,
-    closed_7d=0,
-):
-    """Assemble the complete HTML document."""
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Open PR Dashboard — {html.escape(repo_full)}</title>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-                   Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
-      line-height: 1.6;
-      color: #24292e;
-      background: #f6f8fa;
-      padding: 24px;
-    }}
-
-    .container {{
-      max-width: 1200px;
-      margin: 0 auto;
-      background: #fff;
-      padding: 32px 36px;
-      border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(0,0,0,.12);
-    }}
-
-    h1 {{
-      font-size: 1.75em;
-      color: #1a1a2e;
-      border-bottom: 3px solid #0366d6;
-      padding-bottom: 10px;
-      margin-bottom: 20px;
-    }}
-
-    /* ── Summary stat cards ── */
-    .stat-strip {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-bottom: 28px;
-    }}
-    .stat-card {{
-      background: #f6f8fa;
-      border: 1px solid #e1e4e8;
-      border-radius: 8px;
-      padding: 10px 18px;
-      display: flex;
-      flex-direction: column;
-      min-width: 140px;
-    }}
-    .stat-label {{
-      font-size: 0.68em;
-      font-weight: 600;
-      color: #586069;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      margin-bottom: 3px;
-    }}
-    .stat-value {{
-      font-size: 0.95em;
-      font-weight: 700;
-      color: #1a1a2e;
-    }}
-
-    /* ── Charts layout: pie left, trend right ── */
-    .charts-row {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 28px;
-      align-items: flex-start;
-      margin: 24px 0;
-    }}
-    .chart-left {{
-      flex: 1 1 520px;
-      min-width: 0;
-    }}
-    .chart-right {{
-      flex: 2 1 640px;
-      min-width: 0;
-    }}
-    .chart-container,
-    .age-chart-container,
-    .trend-charts {{
-      overflow-x: auto;
-    }}
-
-    /* ── PR table ── */
-    .pr-table-wrapper {{
-      overflow-x: auto;
-      margin-top: 24px;
-    }}
-
-    table.pr-table {{
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.875em;
-    }}
-
-    table.pr-table thead {{
-      background: #f6f8fa;
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }}
-
-    table.pr-table th {{
-      padding: 10px 10px;
-      text-align: left;
-      font-weight: 600;
-      color: #24292e;
-      border-bottom: 2px solid #d1d5da;
-      white-space: nowrap;
-    }}
-
-    table.pr-table th.num {{ text-align: right; }}
-
-    table.pr-table td {{
-      padding: 9px 10px;
-      border-bottom: 1px solid #e1e4e8;
-      vertical-align: top;
-    }}
-
-    table.pr-table tbody tr:hover {{ background: #f6f8fa; }}
-
-    td.age {{ text-align: right; font-variant-numeric: tabular-nums; }}
-
-    td.draft-yes {{ color: #9a6700; font-weight: 600; }}
-    td.draft-no  {{ color: #57606a; }}
-
-    a {{ color: #0366d6; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-
-    .pr-link {{ font-weight: 600; }}
-
-    /* ── Badges ── */
-    .badge {{
-      display: inline-block;
-      padding: 1px 7px;
-      border-radius: 12px;
-      font-size: 0.78em;
-      font-weight: 600;
-      white-space: nowrap;
-      margin: 1px 2px 1px 0;
-    }}
-
-    /* ── CI checks cell ── */
-    td.ci-cell {{
-      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-      font-size: 0.8em;
-    }}
-    td.ci-cell .badge {{ font-family: inherit; }}
-
-    /* ── Review summary cell ── */
-    .review-group {{
-      margin-bottom: 3px;
-    }}
-    .review-users {{
-      font-size: 0.9em;
-      color: #57606a;
-    }}
-
-    /* ── No-data row ── */
-    .no-data {{
-      text-align: center;
-      color: #57606a;
-      padding: 24px;
-      font-style: italic;
-    }}
-
-    /* ── Footer ── */
-    .footer {{
-      margin-top: 32px;
-      font-size: 0.8em;
-      color: #8b949e;
-      text-align: right;
-    }}
-
-    @media (max-width: 900px) {{
-      .container {{ padding: 16px; }}
-      table.pr-table {{ font-size: 0.8em; }}
-      table.pr-table th, table.pr-table td {{ padding: 7px 6px; }}
-    }}
-
-    @media print {{
-      body {{ background: #fff; }}
-      .container {{ box-shadow: none; }}
-      table.pr-table {{ page-break-inside: auto; }}
-      tr {{ page-break-inside: avoid; }}
-    }}
-  </style>
-</head>
-<body>
-<div class="container">
-
-  <h1>Open PR Dashboard — {html.escape(repo_full)}</h1>
-
-  <!-- Stat cards — table layout for email-client compatibility (flex is stripped) -->
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
-    <tr>
-      <td style="padding:4px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128197; Report Date</span><br><span class="stat-value">{html.escape(date_str)}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128230; Repository</span><br><span class="stat-value">{html.escape(repo_full)}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128275; Open PRs</span><br><span class="stat-value">{total_open}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128221; Draft PRs</span><br><span class="stat-value">{draft_count}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128640; Opened (7d)</span><br><span class="stat-value">{opened_7d}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#9989; Merged (7d)</span><br><span class="stat-value">{merged_7d}</span></td></tr>
-        </table>
-      </td>
-      <td style="padding:3px;">
-        <table cellpadding="7" cellspacing="0" border="0" style="background:#f6f8fa;border:1px solid #e1e4e8;border-radius:8px;min-width:100px;">
-          <tr><td><span class="stat-label">&#128683; Closed (7d)</span><br><span class="stat-value">{closed_7d}</span></td></tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-
-  <!-- Charts row — table layout for email-client compatibility (flex is stripped) -->
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
-    <tr>
-      <td width="65%" valign="top" style="padding-right:14px;">{age_chart_html}</td>
-      <td width="35%" valign="top">{trend_chart_html}</td>
-    </tr>
-  </table>
-
-  <div class="pr-table-wrapper">
-    <table class="pr-table">
-      <thead>
-        <tr>
-          <th>PR</th>
-          <th>Author</th>
-          <th>Assignee</th>
-          <th class="num">Age (days)</th>
-          <th>Draft</th>
-          <th>Labels</th>
-          <th>Reviewers</th>
-          <th>Pending With</th>
-          <th>Review Summary</th>
-          <th>CI Checks</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows_html if rows_html else '<tr><td colspan="10" class="no-data">No open pull requests.</td></tr>'}
-      </tbody>
-    </table>
-  </div>
-
-  <div class="footer">Generated by pr_dashboard.py · {html.escape(date_str)}</div>
-
-</div>
-</body>
-</html>"""
-
-
-# ── Email/Username mapping ───────────────────────────────────────────────────
-
-
-def load_github_usernames():
-    """
-    Load email-to-GitHub-username mapping from email_map.json.
-    Returns a list of GitHub usernames to @mention in the issue.
-    """
->>>>>>> 95524d9 (PR report (#867))
     script_dir = Path(__file__).parent
     email_map_file = os.environ.get("EMAIL_MAP_FILE", script_dir / "email_map.json")
 
@@ -1963,8 +1297,6 @@ def main():
         if not is_bot(author):
             author_counts[author] = author_counts.get(author, 0) + 1
 
-<<<<<<< HEAD
-<<<<<<< HEAD
     # Build shared color map (used by age bar chart)
     color_map = build_author_color_map(author_counts)
 
@@ -1982,31 +1314,6 @@ def main():
     row_parts = []
     pending_age_data: dict = {}  # {author: [age1, age2, ...]}
     draft_prs_per_author: dict = {}  # {author: [pr_number, ...]}
-=======
-    pie_svg = generate_pie_chart_svg(author_counts)
-=======
-    # Build shared color map (used by age bar chart)
-    color_map = build_author_color_map(author_counts)
->>>>>>> f668b40 (PR report (#877))
-
-    # -- Trend chart (opened / merged / closed per day) -----------------------
-    trend_png_file = script_dir / "trend_chart.png"
-    trend_chart_html = generate_trend_chart_png(
-        pulls_open=pulls,
-        pulls_closed=pulls_closed,
-        now=now,
-        days=10,
-        png_path=trend_png_file,
-    )
-
-    # -- Build PR table rows + collect author age data -----------------------
-    row_parts = []
-<<<<<<< HEAD
->>>>>>> 95524d9 (PR report (#867))
-=======
-    pending_age_data: dict = {}  # {author: [age1, age2, ...]}
-    draft_prs_per_author: dict = {}  # {author: [pr_number, ...]}
->>>>>>> f668b40 (PR report (#877))
 
     for pr in pulls:
         number = pr["number"]
@@ -2033,13 +1340,6 @@ def main():
         assignees = [u["login"] for u in pr.get("assignees") or [] if not is_bot(u["login"])]
         assignee_str = html.escape(", ".join(assignees)) if assignees else "—"
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-        # Labels (already in PR payload — no extra API call)
->>>>>>> 95524d9 (PR report (#867))
-=======
->>>>>>> f668b40 (PR report (#877))
         labels = [lbl["name"] for lbl in pr.get("labels") or []]
         labels_html = (
             " ".join(
@@ -2070,23 +1370,10 @@ def main():
         review_summary_html = "\n".join(review_html_parts) if review_html_parts else "<em>No reviews yet</em>"
 
         # Pending With — smart assignment based on PR state
-<<<<<<< HEAD
-<<<<<<< HEAD
         pending_with_raw = determine_pending_with(pr, reviews, rs, requested_reviewers)
         pending_with_str = html.escape(pending_with_raw)
 
         # CI check runs — fully paginated
-=======
-        pending_with_str = html.escape(determine_pending_with(pr, reviews, rs, requested_reviewers))
-
-        # 4) Individual CI check runs — fully paginated
->>>>>>> 95524d9 (PR report (#867))
-=======
-        pending_with_raw = determine_pending_with(pr, reviews, rs, requested_reviewers)
-        pending_with_str = html.escape(pending_with_raw)
-
-        # CI check runs — fully paginated
->>>>>>> f668b40 (PR report (#877))
         ci_html = '<span style="color:#57606a;">UNKNOWN</span>'
         if head_sha:
             check_runs = paginate_check_runs(
@@ -2124,10 +1411,6 @@ def main():
 
     rows_html = "\n        ".join(row_parts)
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> f668b40 (PR report (#877))
     # -- Two left-column charts (share the same sorted x-axis) ----------------
     # Sort authors by total PR count descending — used by both charts
     sorted_authors = sorted(
@@ -2155,7 +1438,6 @@ def main():
     # Combine both charts (stacked vertically) into the left column
     age_chart_html = pr_count_chart_html + pr_age_chart_html
 
-<<<<<<< HEAD
     # -- Write HTML file ------------------------------------------------------
     html_file = script_dir / "pr_report.html"
 
@@ -2171,29 +1453,6 @@ def main():
         merged_7d=merged_7d,
         closed_7d=closed_7d,
     )
-=======
-=======
->>>>>>> f668b40 (PR report (#877))
-    # -- Write HTML file ------------------------------------------------------
-    html_file = script_dir / "pr_report.html"
-
-<<<<<<< HEAD
-    html_content = build_html(repo_full, date_str, total_open, pie_svg, rows_html)
->>>>>>> 95524d9 (PR report (#867))
-=======
-    html_content = build_html(
-        repo_full=repo_full,
-        date_str=date_str,
-        total_open=total_open,
-        age_chart_html=age_chart_html,
-        trend_chart_html=trend_chart_html,
-        rows_html=rows_html,
-        draft_count=draft_count,
-        opened_7d=opened_7d,
-        merged_7d=merged_7d,
-        closed_7d=closed_7d,
-    )
->>>>>>> f668b40 (PR report (#877))
 
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
