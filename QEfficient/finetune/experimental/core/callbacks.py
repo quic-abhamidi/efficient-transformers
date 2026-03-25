@@ -6,7 +6,11 @@
 # -----------------------------------------------------------------------------
 
 import json
+import math
 import os
+import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from transformers import (
@@ -20,6 +24,10 @@ from transformers.integrations.integration_utils import TensorBoardCallback
 from transformers.trainer_callback import TrainerCallback, TrainerControl, TrainerState
 
 from QEfficient.finetune.experimental.core.component_registry import ComponentFactory, registry
+from QEfficient.finetune.experimental.core.config_manager import (
+    ConfigManager,
+)
+from QEfficient.finetune.experimental.core.logger import Logger
 from QEfficient.finetune.experimental.core.utils.profiler_utils import (
     get_op_verifier_ctx,
     init_qaic_profiling,
@@ -30,6 +38,105 @@ registry.callback("early_stopping")(EarlyStoppingCallback)
 registry.callback("printer")(PrinterCallback)
 registry.callback("default_flow")(DefaultFlowCallback)
 registry.callback("tensorboard")(TensorBoardCallback)
+
+logger = Logger(__name__)
+
+# Setting the path for dumping the log file
+output_dir = Path(ConfigManager().config.training["output_dir"])
+log_file = os.path.join(output_dir,f"training_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+
+@registry.callback("train_logger")
+class TrainingLogger(TrainerCallback):
+    def __init__(self, log_file=log_file, rank=0):
+        self.rank = rank  # rank-safe logging (only rank 0)
+        # Log file setup
+        self.log_file = log_file
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        self.epoch_start_time = None
+        self.best_eval_loss = float("inf")
+
+    # ----------------------------------------------------
+    # Safe write to log (only rank 0)
+    # ----------------------------------------------------
+    def _write(self, text):
+        if self.rank != 0:
+            return
+        logger.log_rank_zero(text)
+        with open(self.log_file, "a") as f:
+            f.write(text + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    # ----------------------------------------------------
+    # EPOCH BEGIN
+    # ----------------------------------------------------
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        if self.rank != 0:
+            return
+
+        epoch = int(state.epoch) + 1
+        self.epoch_start_time = time.time()
+        if state.is_world_process_zero:
+            self._write(f"TRAINING INFO: Starting epoch {epoch}/{int(args.num_train_epochs)}")
+
+    # ----------------------------------------------------
+    # EVALUATION
+    # ----------------------------------------------------
+    def on_evaluate(self, args, state, control, metrics, **kwargs):
+        if self.rank != 0:
+            return
+
+        epoch = int(state.epoch)
+        eval_loss = None
+        eval_metric = None
+
+        for entry in reversed(state.log_history):
+            if "eval_loss" in entry:
+                eval_loss = entry["eval_loss"]
+                break
+        if eval_loss is not None:
+            eval_metric = math.exp(eval_loss)
+        # Track best eval loss
+        if eval_loss is not None and eval_loss < self.best_eval_loss:
+            self.best_eval_loss = eval_loss
+            if state.is_world_process_zero:
+                self._write(f"EVALUATION INFO: Best eval loss on epoch {epoch} is {eval_loss:.4f}")
+        if state.is_world_process_zero:
+            self._write(
+                f"EVALUATION INFO: Epoch {epoch}: Eval Loss: {eval_loss:.4f} || Eval metric: {eval_metric:.4f}"
+            )
+
+    # ----------------------------------------------------
+    # EPOCH END — TRAIN LOSS + METRIC + TIME
+    # ----------------------------------------------------
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if self.rank != 0:
+            return
+
+        epoch = int(state.epoch)
+        epoch_time = time.time() - self.epoch_start_time
+
+        # Extract the last recorded train loss
+        train_loss = None
+        for entry in reversed(state.log_history):
+            if "loss" in entry:
+                train_loss = entry["loss"]
+                break
+
+        # Compute perplexity safely
+        train_metric = None
+        if train_loss is not None:
+            train_metric = math.exp(train_loss)
+        if state.is_world_process_zero:
+            self._write(
+                f"TRAINING INFO: Epoch {epoch}: "
+                f" Train epoch loss: {train_loss:.4f} || "
+                f" Train metric: {train_metric} || "
+                f" Epoch time {epoch_time:.2f} sec"
+            )
+        state.log_history.append({"train/epoch_time_sec": epoch_time, "epoch": state.epoch})
+        control.should_log = True
 
 
 @registry.callback("enhanced_progressbar")
@@ -74,10 +181,10 @@ class EnhancedProgressCallback(ProgressCallback):
                 else:
                     shallow_logs[k] = v
             _ = shallow_logs.pop("total_flos", None)
+
             # round numbers so that it looks better in console
             if "epoch" in shallow_logs:
                 shallow_logs["epoch"] = round(shallow_logs["epoch"], 2)
-
             updated_dict = {}
             if "epoch" in shallow_logs:
                 updated_dict["epoch"] = shallow_logs["epoch"]
@@ -223,6 +330,9 @@ def replace_progress_callback(trainer: Any, callbacks: list[Any], logger: Any = 
             pass
 
         try:
+            # Add Train Logger
+            #train_logger = ComponentFactory.create_callback("train_logger")
+            #trainer.add_callback(train_logger)
             # Add EnhancedProgressCallback
             enhanced_callback = ComponentFactory.create_callback("enhanced_progressbar")
             trainer.add_callback(enhanced_callback)
@@ -233,3 +343,13 @@ def replace_progress_callback(trainer: Any, callbacks: list[Any], logger: Any = 
                 import warnings
 
                 warnings.warn(f"Could not add enhanced progress callback: {e}")
+        try:
+            # Add Train Logger
+            train_logger = ComponentFactory.create_callback("train_logger")
+            trainer.add_callback(train_logger)
+        except Exception as e:
+            if logger:
+                logger.log_rank_zero(f"Warning: Could not add train logger callback: {e}", level="warning")
+            else:
+                import warnings
+                warnings.warn(f"Could not add train warning callback: {e}") 

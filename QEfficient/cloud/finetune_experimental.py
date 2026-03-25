@@ -14,7 +14,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from QEfficient.finetune.experimental.core.callbacks import replace_progress_callback
+from peft import get_peft_model
+
+from QEfficient.finetune.experimental.core.callbacks import TrainingLogger, replace_progress_callback
 from QEfficient.finetune.experimental.core.component_registry import ComponentFactory
 from QEfficient.finetune.experimental.core.config_manager import (
     ConfigManager,
@@ -29,7 +31,7 @@ from QEfficient.finetune.experimental.core.utils.peft_utils import convert_peft_
 from QEfficient.finetune.experimental.core.utils.training_config_utils import prepare_training_config
 
 logger = Logger(__name__)
-
+train_logger = TrainingLogger(rank=0)
 # Try importing QAIC-specific module, proceed without it if it's unavailable
 try:
     import torch_qaic  # noqa: F401
@@ -56,7 +58,6 @@ class FineTuningPipeline:
         self.config = self.config_manager.config
         self.output_dir = Path(self.config.training["output_dir"])
         self._setup_environment()
-
         # Prepare training configuration
         self.training_config = prepare_training_config(config_manager=self.config_manager)
 
@@ -98,6 +99,7 @@ class FineTuningPipeline:
 
     def _setup_environment(self) -> None:
         """Set up environment variables for output directories."""
+        self.rank = int(os.environ.get("RANK", "0"))
         os.environ["OUTPUT_DIR"] = str(self.output_dir)
         os.environ["TRACKIO_DIR"] = str(self.output_dir / "trackio_logs")
         os.environ["TENSORBOARD_LOGGING_DIR"] = str(self.output_dir)
@@ -232,7 +234,7 @@ class FineTuningPipeline:
             Trainer instance
         """
         trainer_type = training_config.pop("type")
-
+        training_config.pop("log_file_name", None)
         # Get PEFT config if enabled
         model_config_dict = self.config_manager.get_model_config()
         peft_config = None
@@ -245,6 +247,18 @@ class FineTuningPipeline:
         dependencies = {}
         if peft_config is not None:
             dependencies["peft_config"] = peft_config
+            if self.rank == 0:
+                 model_configuration = get_peft_model(model, peft_config)
+                 trainable_params, all_param = model_configuration.get_nb_trainable_parameters()
+                 pct = (trainable_params / all_param) * 100
+                 model_configuration.unload() #Removing the peft adapters
+                 train_logger._write(f"TRAINING INFO: Model has {all_param/1e6:.4f} Million params.")
+                 train_logger._write(
+                       f"TRAINING INFO: Trainable params: {trainable_params} || "
+                       f"all params: {all_param} || trainable%: {pct:.4f}"
+                 )
+
+
         trainer_cls, args_cls, additional_kwargs = ComponentFactory.create_trainer_config(trainer_type, **dependencies)
 
         # Clean up training config: remove fields that shouldn't be passed to TrainingArguments
@@ -265,12 +279,16 @@ class FineTuningPipeline:
         if num_samples > 0:
             # Truncating datasets to a smaller number of samples.
             # If you want to use all data, set dataset_num_samples to -1 or remove it from config.
-            if (num_samples * split_ratio) / len(train_dataset) <= 0.05:
-                logger.log_rank_zero("Using fewer samples may impact finetuning quality.", logging.WARNING)
+            logger.warning("Using fewer samples may impact finetuning quality.")
             subset_train_indices = list(range(0, int(num_samples * split_ratio)))
             subset_eval_indices = list(range(0, int(num_samples - num_samples * split_ratio)))
             eval_dataset = eval_dataset.select(subset_eval_indices)
             train_dataset = train_dataset.select(subset_train_indices)
+        if self.rank == 0:
+             train_logger._write(f"TRAINING INFO: Length of Training Dataset is {len(train_dataset)}")
+             train_logger._write(f"TRAINING INFO: Length of Evaluation Dataset is {len(eval_dataset)}")
+
+
         trainer = trainer_cls(
             model=model,
             processing_class=tokenizer,
