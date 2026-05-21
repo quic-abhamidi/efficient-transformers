@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Dict, List
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from datasets import Dataset
@@ -152,6 +153,39 @@ def _assert_finite_positive_loss(value: float, label: str, *, gt: float = 0.0) -
     tensor_val = torch.tensor(value, dtype=torch.float32)
     assert torch.isfinite(tensor_val), f"{label} is not finite: {value}"
     assert value > gt, f"{label} = {value:.4f} ≤ {gt}; expected loss strictly above {gt}."
+
+
+def load_llama_model_and_tokenizer(reduced_layers=None, device_map=None):
+    """
+    Load Llama-3.2-1B with num_hidden_layers reduced to _REDUCED_LAYERS.
+    Optionally injects a PP device_map.
+    """
+    from QEfficient.finetune.experimental.core.component_registry import ComponentFactory
+    from QEfficient.finetune.experimental.core.model import HFModel  # noqa: F401
+
+    kwargs = {
+        "auto_class_name": "AutoModelForCausalLM",
+        "use_cache": False,
+        "attn_implementation": "eager",
+        "num_hidden_layers": reduced_layers,
+    }
+    if device_map is not None:
+        kwargs["device_map"] = device_map
+    return ComponentFactory.create_model("hf", _LLAMA_MODEL_NAME, **kwargs)
+
+
+def make_device_map_for_reduced_model(pp_degree: int, local_rank: int = 0) -> Dict[str, int]:
+    """PP device_map for the 2-layer Llama-3.2-1B (tied embeddings)."""
+    first_device = local_rank * pp_degree
+    last_device = first_device + pp_degree - 1
+    return {
+        "model.embed_tokens": first_device,
+        "lm_head": first_device,  # tied
+        "model.norm": last_device,
+        "model.rotary_emb": last_device,
+        "model.layers.0": first_device,
+        "model.layers.1": last_device,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -871,7 +905,7 @@ class TestPPE2ETraining:
     OUTPUT_DIR_SINGLE = "/tmp/test_pp_llama_single"
     OUTPUT_DIR_PP2 = "/tmp/test_pp_llama_pp2"
     _REDUCED_LAYERS = 2  # Use 2-layer model for speed; PP logic is layer-count agnostic
-    _MAX_STEPS = 5
+    _MAX_STEPS = 50
 
     @pytest.fixture(autouse=True)
     def cleanup(self):
@@ -880,41 +914,6 @@ class TestPPE2ETraining:
         for d in (self.OUTPUT_DIR_SINGLE, self.OUTPUT_DIR_PP2):
             if os.path.exists(d):
                 shutil.rmtree(d, ignore_errors=True)
-
-    # -- helpers -------------------------------------------------------------
-
-    def _load_llama_model_and_tokenizer(self, device_map=None):
-        """
-        Load Llama-3.2-1B with num_hidden_layers reduced to _REDUCED_LAYERS.
-        Optionally injects a PP device_map.
-        """
-        from QEfficient.finetune.experimental.core.component_registry import ComponentFactory
-        from QEfficient.finetune.experimental.core.model import HFModel  # noqa: F401
-
-        kwargs = {
-            "auto_class_name": "AutoModelForCausalLM",
-            "use_cache": False,
-            "attn_implementation": "eager",
-            "num_hidden_layers": self._REDUCED_LAYERS,
-        }
-        if device_map is not None:
-            kwargs["device_map"] = device_map
-        return ComponentFactory.create_model("hf", _LLAMA_MODEL_NAME, **kwargs)
-
-    def _make_device_map_for_reduced_model(self, pp_degree: int, local_rank: int = 0) -> Dict[str, int]:
-        """PP device_map for the 2-layer Llama-3.2-1B (tied embeddings)."""
-        first_device = local_rank * pp_degree
-        last_device = first_device + pp_degree - 1
-        return {
-            "model.embed_tokens": first_device,
-            "lm_head": first_device,  # tied
-            "model.norm": last_device,
-            "model.rotary_emb": last_device,
-            "model.layers.0": first_device,
-            "model.layers.1": last_device,
-        }
-
-    # -- multi-device (pp_degree=2) ------------------------------------------
 
     @pytest.mark.skipif(
         torch.qaic.device_count() < 2,
@@ -931,7 +930,7 @@ class TestPPE2ETraining:
           • The complete set of assigned devices is exactly {0, 1} (no ghost stages).
         """
         pp_degree = 2
-        dmap = self._make_device_map_for_reduced_model(pp_degree=pp_degree)
+        dmap = make_device_map_for_reduced_model(pp_degree=pp_degree)
 
         # Co-location invariants
         assert dmap["lm_head"] == dmap["model.embed_tokens"], (
@@ -974,8 +973,8 @@ class TestPPE2ETraining:
         from peft import LoraConfig
         from trl import SFTConfig, SFTTrainer
 
-        dmap = self._make_device_map_for_reduced_model(pp_degree=2)
-        hf_model = self._load_llama_model_and_tokenizer(device_map=dmap)
+        dmap = make_device_map_for_reduced_model(pp_degree=2)
+        hf_model = load_llama_model_and_tokenizer(reduced_layers=self._REDUCED_LAYERS, device_map=dmap)
         lora_cfg = LoraConfig(
             task_type="CAUSAL_LM",
             r=4,
@@ -1028,3 +1027,129 @@ class TestPPE2ETraining:
         lora_devices = {f"{p.device.type}:{p.device.index}" for _, p in lora_params}
         assert "qaic:0" in lora_devices, "No LoRA adapter on qaic:0 – stage 0 is untrained."
         assert "qaic:1" in lora_devices, "No LoRA adapter on qaic:1 – stage 1 is untrained."
+
+
+@pytest.mark.finetuning_pipeline
+@pytest.mark.skipif(
+    torch.qaic.device_count() < 2,
+    reason="Parity test requires at least 2 QAIC devices",
+)
+class TestPPPipelineParity:
+    """
+    Parity test between:
+    - Single-device FineTuningPipeline
+    - Pipeline Parallel (pp_degree=2)
+
+    Ensures enabling PP does not significantly change training behavior.
+    """
+
+    OUTPUT_DIR_SINGLE = "/tmp/test_pp_pipeline_single"
+    OUTPUT_DIR_PP2 = "/tmp/test_pp_pipeline_pp2"
+    _REDUCED_LAYERS = 2  # Use 2-layer model for speed; PP logic is layer-count agnostic
+    _MAX_STEPS = 50
+
+    def _build_config_manager(self, pp_degree: int, output_dir: str):
+        """
+        Create a minimal ConfigManager instance with required overrides.
+        """
+        from QEfficient.finetune.experimental.core.config_manager import ConfigManager
+
+        if pp_degree > 1:
+            dmap = make_device_map_for_reduced_model(pp_degree=pp_degree)
+        else:
+            dmap = None
+        hf_model = load_llama_model_and_tokenizer(reduced_layers=self._REDUCED_LAYERS, device_map=dmap)
+        cm = ConfigManager()
+
+        # --- Training config overrides ---
+        cm.config.model_name = hf_model.model_name
+        cm.config.training["output_dir"] = output_dir
+        cm.config.training["pp_degree"] = pp_degree
+        cm.config.training["device"] = "qaic"
+        cm.config.training["seed"] = 42
+        cm.config.training["max_steps"] = self._MAX_STEPS
+        cm.config.training["per_device_train_batch_size"] = 1
+        cm.config.training["per_device_eval_batch_size"] = 1
+        cm.config.training["logging_steps"] = 1
+        cm.config.training["logging_strategy"] = "steps"
+        cm.config.training["eval_steps"] = 50
+        cm.config.training["eval_strategy"] = "steps"
+        cm.config.dataset["prompt_func"] = (
+            "QEfficient.finetune.experimental.preprocessing.alpaca_func:create_alpaca_prompt"  # function to create prompt from dataset fields
+        )
+        cm.config.dataset["completion_template"] = "{output}"  # Model will be trained on this part.
+        cm.config.dataset["dataset_num_samples"] = (
+            100  # Use all samples for training to speed up test (not realistic but sufficient for parity check)
+        )
+        return cm
+
+    def _run_pipeline(self, config_manager):
+        from QEfficient.cloud.finetune_experimental import FineTuningPipeline
+
+        pipeline = FineTuningPipeline(config_manager)
+        pipeline.run()
+
+        trainer = pipeline.trainer
+        # ✅ Train loss
+        train_loss = None
+        if hasattr(trainer, "state") and hasattr(trainer.state, "log_history"):
+            losses = [(entry["step"], entry["loss"]) for entry in trainer.state.log_history if "loss" in entry]
+            train_loss = losses if losses else None
+        # ✅ Eval loss
+        eval_loss = None
+        if hasattr(trainer, "evaluate"):
+            metrics = trainer.evaluate()
+            eval_loss = metrics.get("eval_loss")
+
+        return train_loss, eval_loss
+
+    def test_single_vs_pp2_loss_parity(self):
+        """
+        Compare single-device vs PP (2 devices) training loss.
+        """
+
+        # ---------------------------
+        # Single-device run
+        # ---------------------------
+        cm_single = self._build_config_manager(
+            pp_degree=1,
+            output_dir=self.OUTPUT_DIR_SINGLE,
+        )
+
+        single_train_loss, single_eval_loss = self._run_pipeline(cm_single)
+        single_train_loss = np.mean(single_train_loss) if single_train_loss is not None else None
+        single_eval_loss = np.mean(single_eval_loss) if single_eval_loss is not None else None
+        _assert_finite_positive_loss(single_train_loss, "Single-device train_loss")
+        if single_eval_loss is not None:
+            _assert_finite_positive_loss(single_eval_loss, "Single-device eval_loss")
+
+        # ---------------------------
+        # Pipeline Parallel run
+        # ---------------------------
+        cm_pp2 = self._build_config_manager(
+            pp_degree=2,
+            output_dir=self.OUTPUT_DIR_PP2,
+        )
+
+        pp2_train_loss, pp2_eval_loss = self._run_pipeline(cm_pp2)
+        pp2_train_loss = np.mean(pp2_train_loss) if pp2_train_loss is not None else None
+        pp2_eval_loss = np.mean(pp2_eval_loss) if pp2_eval_loss is not None else None
+        _assert_finite_positive_loss(pp2_train_loss, "PP=2 train_loss")
+        if pp2_eval_loss is not None:
+            _assert_finite_positive_loss(pp2_eval_loss, "PP=2 eval_loss")
+
+        # ---------------------------
+        # Parity checks
+        # ---------------------------
+
+        # ✅ training loss parity
+        assert abs(single_train_loss - pp2_train_loss) < 1e-2, (
+            f"Train loss mismatch:\n  Single: {single_train_loss}\n  PP=2  : {pp2_train_loss}"
+        )
+        print(f"Train loss parity check passed: single={single_train_loss:.4f} vs pp2={pp2_train_loss:.4f}")
+        # ✅ eval loss parity
+        if single_eval_loss is not None and pp2_eval_loss is not None:
+            assert abs(single_eval_loss - pp2_eval_loss) < 1e-2, (
+                f"Eval loss mismatch:\n  Single: {single_eval_loss}\n  PP=2  : {pp2_eval_loss}"
+            )
+        print(f"Eval loss parity check passed: single={single_eval_loss:.4f} vs pp2={pp2_eval_loss:.4f}")
