@@ -60,9 +60,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-mock", "pytest-xdist"]
+test = ["pytest", "pytest-mock", "pytest-xdist", "matplotlib>=3.7"]
 docs = ["Sphinx==7.1.2","sphinx-rtd-theme==2.0.0","myst-parser==3.0.1","sphinx-multiversion"]
 quality = ["black", "ruff", "hf_doc_builder@git+https://github.com/huggingface/doc-builder.git"]
+model_pruning = [
+    "accelerate>=0.20",
+    "lm-eval>=0.4",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "seaborn>=0.13",
+    "tqdm>=4.65",
+]
 
 [tool.setuptools.package-data]
 "QEfficient.transformers.models.gemma3.configs" = ["*.yaml"]
@@ -100,5 +110,8 @@ markers = [
     "qnn: marks QNN tests",
     "cli: marks CLI tests",
     "finetune: marks finetune tests",
+    "model_pruning: marks model pruning tests",
+    "model_pruning_gpu: marks model pruning GPU pipeline tests",
+    "model_pruning_qaic: marks model pruning QAIC pipeline tests",
     "vllm: marks vLLM tests"
 ]
