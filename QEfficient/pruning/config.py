@@ -34,8 +34,56 @@ class LayerSkipConfig:
 
 
 @dataclass(frozen=True)
+class LayerSkipCompensationConfig:
+    kind: str
+    patch_weights: Path
+    injection_layer: int | None = None
+    alpha: float = 1.0
+
+    @classmethod
+    def from_raw(cls, raw_config: Any) -> LayerSkipCompensationConfig | None:
+        if raw_config is None:
+            return None
+        if not isinstance(raw_config, dict):
+            raise TypeError("layer_skip_compensation must be a dictionary when provided.")
+
+        kind = str(raw_config.get("type", "linear_residual_patch"))
+        if kind != "linear_residual_patch":
+            raise ValueError(f"Unsupported layer skip compensation type: {kind!r}.")
+
+        patch_weights = raw_config.get("patch_weights")
+        if patch_weights is None:
+            raise ValueError("linear_residual_patch compensation requires patch_weights.")
+        patch_weights = Path(patch_weights)
+
+        injection_layer = raw_config.get("injection_layer")
+        if injection_layer is not None:
+            injection_layer = int(injection_layer)
+            if injection_layer < 0:
+                raise ValueError("layer_skip_compensation.injection_layer must be non-negative.")
+
+        return cls(
+            kind=kind,
+            patch_weights=patch_weights,
+            injection_layer=injection_layer,
+            alpha=float(raw_config.get("alpha", 1.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "type": self.kind,
+            "patch_weights": str(self.patch_weights),
+            "alpha": self.alpha,
+        }
+        if self.injection_layer is not None:
+            result["injection_layer"] = self.injection_layer
+        return result
+
+
+@dataclass(frozen=True)
 class PruningConfig:
     layer_skip: LayerSkipConfig | None = None
+    layer_skip_compensation: LayerSkipCompensationConfig | None = None
 
     @classmethod
     def from_qaic_config(cls, qaic_config: dict | None) -> PruningConfig | None:
@@ -83,7 +131,10 @@ class PruningConfig:
                 "or a NAS transform entry with kind='skip_layers'."
             )
 
-        return cls(layer_skip=LayerSkipConfig.from_layers(raw_skip_layers))
+        return cls(
+            layer_skip=LayerSkipConfig.from_layers(raw_skip_layers),
+            layer_skip_compensation=LayerSkipCompensationConfig.from_raw(qaic_config.get("layer_skip_compensation")),
+        )
 
     @staticmethod
     def _load_json_config(config_path: str | Path, field_name: str) -> dict[str, Any]:
@@ -99,6 +150,8 @@ class PruningConfig:
         result: dict[str, Any] = {}
         if self.layer_skip is not None:
             result["skip_layers"] = list(self.layer_skip.layers)
+        if self.layer_skip_compensation is not None:
+            result["layer_skip_compensation"] = self.layer_skip_compensation.to_dict()
         return result
 
 

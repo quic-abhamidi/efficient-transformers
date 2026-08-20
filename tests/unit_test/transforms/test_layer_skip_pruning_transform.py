@@ -322,6 +322,91 @@ class TestLayerSkipPruningTransform:
         with pytest.raises(ValueError, match="out of range"):
             PruningTransform.apply(model, config)
 
+    def test_layer_skip_compensation_config_parses(self, tmp_path):
+        from QEfficient.pruning.config import PruningConfig
+
+        skip_path = tmp_path / "layer_skip.json"
+        skip_path.write_text(json.dumps({"skip_layers": [1]}))
+        patch_path = tmp_path / "linear_patch.pt"
+        patch_path.write_bytes(b"placeholder")
+
+        config = PruningConfig.from_qaic_config(
+            {
+                "enable_layer_skipping": True,
+                "layer_skip_config": str(skip_path),
+                "layer_skip_compensation": {
+                    "type": "linear_residual_patch",
+                    "patch_weights": str(patch_path),
+                    "injection_layer": 0,
+                    "alpha": 0.5,
+                },
+            }
+        )
+
+        assert config is not None
+        assert config.layer_skip_compensation is not None
+        assert config.layer_skip_compensation.kind == "linear_residual_patch"
+        assert config.layer_skip_compensation.injection_layer == 0
+        assert config.layer_skip_compensation.alpha == 0.5
+        assert config.to_dict()["layer_skip_compensation"]["patch_weights"] == str(patch_path)
+
+    def test_layer_skip_compensation_wraps_next_surviving_layer(self, tmp_path):
+        from QEfficient.pruning import PatchedDecoderLayer, SkippedDecoderLayer
+        from QEfficient.pruning.config import PruningConfig
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform, PruningTransform
+
+        model = make_tiny_qwen3()
+        model, _ = KVCacheTransform.apply(model)
+        patch_path = tmp_path / "linear_patch.pt"
+        torch.save(
+            {"state_dict": {"linear.weight": torch.zeros(model.config.hidden_size, model.config.hidden_size)}},
+            patch_path,
+        )
+        config = PruningConfig.from_qaic_config(
+            {
+                "enable_pruning": True,
+                "pruning_config": {"skip_layers": [0]},
+                "layer_skip_compensation": {"type": "linear_residual_patch", "patch_weights": str(patch_path)},
+            }
+        )
+
+        model, transformed = PruningTransform.apply(model, config)
+
+        assert transformed
+        assert isinstance(model.model.layers[0], SkippedDecoderLayer)
+        assert isinstance(model.model.layers[1], PatchedDecoderLayer)
+
+        hidden_states = torch.randn(1, 2, model.config.hidden_size)
+        with torch.no_grad():
+            patched = model.model.layers[1].patch(hidden_states)
+        assert torch.equal(patched, hidden_states)
+
+    def test_layer_skip_compensation_rejects_skipped_injection_layer(self, tmp_path):
+        from QEfficient.pruning.config import PruningConfig
+        from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform, PruningTransform
+
+        model = make_tiny_qwen3()
+        model, _ = KVCacheTransform.apply(model)
+        patch_path = tmp_path / "linear_patch.pt"
+        torch.save(
+            {"state_dict": {"linear.weight": torch.zeros(model.config.hidden_size, model.config.hidden_size)}},
+            patch_path,
+        )
+        config = PruningConfig.from_qaic_config(
+            {
+                "enable_pruning": True,
+                "pruning_config": {"skip_layers": [0]},
+                "layer_skip_compensation": {
+                    "type": "linear_residual_patch",
+                    "patch_weights": str(patch_path),
+                    "injection_layer": 0,
+                },
+            }
+        )
+
+        with pytest.raises(ValueError, match="cannot be skipped"):
+            PruningTransform.apply(model, config)
+
     def test_layer_skip_onnx_transform_preserves_skipped_retained_state_inputs(self):
         import onnx
         from onnx import TensorProto, helper

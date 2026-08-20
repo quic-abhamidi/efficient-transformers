@@ -5,7 +5,15 @@
 #
 # -----------------------------------------------------------------------------
 
-from QEfficient.pruning.config import LayerSkipConfig, PruningConfig
+from QEfficient.pruning.config import LayerSkipCompensationConfig, LayerSkipConfig, PruningConfig
 from QEfficient.pruning.layer_skip import SkippedDecoderLayer
+from QEfficient.pruning.residual_patch import LinearResidualPatch, PatchedDecoderLayer
 
-__all__ = ["LayerSkipConfig", "PruningConfig", "SkippedDecoderLayer"]
+__all__ = [
+    "LayerSkipCompensationConfig",
+    "LayerSkipConfig",
+    "LinearResidualPatch",
+    "PatchedDecoderLayer",
+    "PruningConfig",
+    "SkippedDecoderLayer",
+]

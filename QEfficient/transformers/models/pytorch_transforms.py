@@ -1487,5 +1487,7 @@ class PruningTransform:
     def apply(cls, model: nn.Module, pruning_config: PruningConfig) -> tuple[nn.Module, bool]:
         transformed = False
         if pruning_config.layer_skip is not None:
-            model, transformed = apply_layer_skip(model, pruning_config.layer_skip)
+            model, transformed = apply_layer_skip(
+                model, pruning_config.layer_skip, pruning_config.layer_skip_compensation
+            )
         return model, transformed

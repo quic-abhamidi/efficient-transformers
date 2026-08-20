@@ -32,6 +32,7 @@ Welcome to Efficient-Transformers Documentation!
 
    source/quick_start
    source/features_enablement
+   source/layer_skip_linear_patch
 
 .. toctree::
    :caption: API Reference
