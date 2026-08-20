@@ -24,6 +24,7 @@ from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
     FP16ClipTransform,
     OnnxTransformPipeline,
+    PreserveSkippedLayerRetainedStateTransform,
     PruneFakeInitializersTransform,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
@@ -38,8 +39,10 @@ from QEfficient.compile.mdp_generator import (
 from QEfficient.compile.qnn_compiler import compile as qnn_compile
 from QEfficient.customop.dynamo_ops import DYNAMO_CUSTOM_OP_TABLE
 from QEfficient.generation.cloud_infer import QAICInferenceSession
+from QEfficient.pruning.config import PruningConfig
 from QEfficient.transformers.models.pytorch_transforms import (
     BlockingAttentionTransform,
+    PruningTransform,
     ReplicateKVHeadTransform,
 )
 from QEfficient.utils import (
@@ -588,6 +591,9 @@ class QEFFBaseModel(ABC):
                 "dynamic_axes": None if dynamo else dynamic_axes,  # dynamo uses dynamic_shapes, not axes
                 "onnx_export_opset": constants.get_onnx_export_opset(dynamo),
             }
+            skipped_layers = getattr(self, "_layer_skip_onnx_layers", None)
+            if skipped_layers is not None:
+                transform_kwargs["skipped_layers"] = skipped_layers
             if onnx_transform_kwargs is not None:
                 transform_kwargs.update(onnx_transform_kwargs)
 
@@ -945,6 +951,15 @@ class QEFFBaseModel(ABC):
         else:
             # without a model config, this is not a model that is possible to block
             blocking_config = None
+
+        pruning_config = PruningConfig.from_qaic_config(qaic_config)
+        if pruning_config is not None:
+            self.model, _ = PruningTransform.apply(self.model, pruning_config=pruning_config)
+            self.hash_params["pruning_config"] = pruning_config.to_dict()
+            if pruning_config.layer_skip is not None:
+                self._layer_skip_onnx_layers = list(pruning_config.layer_skip.layers)
+                if PreserveSkippedLayerRetainedStateTransform not in self._onnx_transforms:
+                    self._onnx_transforms = list(self._onnx_transforms) + [PreserveSkippedLayerRetainedStateTransform]
 
         if blocking_config is not None:
             self.model, _ = BlockingAttentionTransform.apply(self.model, attn_blocking_config=blocking_config)

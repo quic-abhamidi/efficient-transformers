@@ -42,6 +42,15 @@ skip_vision = False
 # comp_ctx_lengths_prefill = [2048]
 # comp_ctx_lengths_decode = [4096,65536]
 
+# Layer skipping is disabled by default. To export/compile a language ONNX graph
+# with selected decoder layers bypassed, set this flag and provide a JSON file
+# containing either {"skip_layers": [...]} or a NAS transform plan with kind="skip_layers".
+enable_layer_skipping = False
+layer_skip_config_path = "examples/image_text_to_text/models/qwen3_vl_moe/configs/qwen3_vl_30b_layer_skip.json"
+layer_skip_qaic_config = (
+    {"enable_layer_skipping": True, "layer_skip_config": layer_skip_config_path} if enable_layer_skipping else None
+)
+
 if skip_vision:
     ## Only Text ##
     ## Set Batch_Size ##
@@ -61,6 +70,7 @@ if skip_vision:
         use_onnx_subfunctions=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
+        qaic_config=layer_skip_qaic_config,
     )
 
     messages = [
@@ -107,6 +117,7 @@ else:
         use_onnx_subfunctions=True,
         # comp_ctx_lengths_prefill=comp_ctx_lengths_prefill,
         # comp_ctx_lengths_decode=comp_ctx_lengths_decode,
+        qaic_config=layer_skip_qaic_config,
     )
 
     ### IMAGE + TEXT ###

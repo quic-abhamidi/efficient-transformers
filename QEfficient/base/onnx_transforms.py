@@ -415,6 +415,80 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
         return changed
 
 
+class PreserveSkippedLayerRetainedStateTransform(BaseOnnxTransform):
+    """Make skipped decoder layers retain KV cache buffers by pass-through.
+
+    Layer skipping replaces a decoder block with a hidden-state pass-through. For
+    retained KV cache outputs, a skipped layer should not synthesize a fresh float
+    cache tensor. It must preserve the input retained-state ABI exactly, which is
+    especially important when custom IO lowers the cache to mxint8 packed buffers.
+    """
+
+    _KV_RETAINED_SUFFIX = "_RetainedState"
+
+    @classmethod
+    def apply(cls, model: ModelProto, skipped_layers: list[int] | None = None, **kwargs) -> bool:
+        if not skipped_layers:
+            return False
+
+        graph = model.graph
+        input_names = {value.name for value in graph.input}
+        graph_output_names = {value.name for value in graph.output}
+        changed = False
+
+        for layer_idx in sorted({int(layer) for layer in skipped_layers}):
+            for cache_kind in ("key", "value"):
+                input_name = f"past_{cache_kind}.{layer_idx}"
+                retained_output_name = f"{input_name}{cls._KV_RETAINED_SUFFIX}"
+                if input_name not in input_names or retained_output_name not in graph_output_names:
+                    continue
+
+                if cls._has_identity(graph, input_name, retained_output_name):
+                    continue
+
+                changed |= cls._release_existing_output_producer(graph, retained_output_name)
+
+                if not cls._has_identity(graph, input_name, retained_output_name):
+                    identity_name = f"qeff_layer_skip_passthrough_{input_name.replace(chr(46), chr(95))}"
+                    graph.node.append(
+                        onnx.helper.make_node(
+                            "Identity",
+                            inputs=[input_name],
+                            outputs=[retained_output_name],
+                            name=identity_name,
+                        )
+                    )
+                    changed = True
+
+        return changed
+
+    @staticmethod
+    def _has_identity(graph: onnx.GraphProto, input_name: str, output_name: str) -> bool:
+        return any(
+            node.op_type == "Identity"
+            and len(node.input) == 1
+            and node.input[0] == input_name
+            and len(node.output) == 1
+            and node.output[0] == output_name
+            for node in graph.node
+        )
+
+    @staticmethod
+    def _release_existing_output_producer(graph: onnx.GraphProto, output_name: str) -> bool:
+        changed = False
+        replacement_name = f"{output_name}_qeff_layer_skip_unused"
+        produced_replacement_names = {name for node in graph.node for name in node.output}
+        while replacement_name in produced_replacement_names:
+            replacement_name = f"{replacement_name}_"
+
+        for node in graph.node:
+            for idx, node_output in enumerate(node.output):
+                if node_output == output_name:
+                    node.output[idx] = replacement_name
+                    changed = True
+        return changed
+
+
 class RenameRepeatedSubgraphTransform(BaseOnnxTransform):
     """Rename dynamo repeated_subgraph function names to model-specific layer class names.
 
@@ -655,6 +729,11 @@ class OnnxTransformPipeline(BaseOnnxTransform):
 
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
+
+        if PreserveSkippedLayerRetainedStateTransform in requested:
+            applied[PreserveSkippedLayerRetainedStateTransform] = PreserveSkippedLayerRetainedStateTransform.apply(
+                model, skipped_layers=kwargs.get("skipped_layers")
+            )
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)

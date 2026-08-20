@@ -308,6 +308,8 @@ from QEfficient.base.pytorch_transforms import (
     ModuleMutatorTransform,
 )
 from QEfficient.customop import CustomRMSNormAIC, GemmaCustomRMSNormAIC
+from QEfficient.pruning.config import PruningConfig
+from QEfficient.pruning.layer_skip import apply_layer_skip
 from QEfficient.transformers.embeddings.embedding_utils import POOLING_MAP, PooledModel, validate_user_pooling_function
 from QEfficient.transformers.models.bert.modeling_bert import (
     QEffBertModel,
@@ -1477,4 +1479,13 @@ class BlockingAttentionTransform:
                 transformed = True
             elif module.__class__.__name__.endswith("Attention") and type(module) not in supported_attention_classes:
                 warnings.warn(f"Blocking is not yet supported for {type(module)}.")
+        return model, transformed
+
+
+class PruningTransform:
+    @classmethod
+    def apply(cls, model: nn.Module, pruning_config: PruningConfig) -> tuple[nn.Module, bool]:
+        transformed = False
+        if pruning_config.layer_skip is not None:
+            model, transformed = apply_layer_skip(model, pruning_config.layer_skip)
         return model, transformed
