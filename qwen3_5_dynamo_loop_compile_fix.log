@@ -1,0 +1,309 @@
+# Qwen3.5 Dynamo torch.while_loop Compile Fix Log
+
+Date: 2026-09-16
+Repository: /home/abhamidi/vlm_loop_bug/efficient-transformers
+Virtualenv: /home/abhamidi/kv_blocking/kv_env
+Model/script under test: examples/image_text_to_text/models/qwen3_5/qwen3_5_dynamo_image.py
+Target model: Qwen/Qwen3.5-0.8B
+
+## Issue
+
+The Qwen3.5 VLM Dynamo image-text compile path exported successfully, but QAIC
+compile failed after adding torch.while_loop for the gated delta recurrence.
+
+Original compiler failure:
+
+```text
+QAIC_ERROR:
+Error message: Loop operator cond input must be a constant.
+Unable to AddNodesToGraphFromModel
+```
+
+The failure occurred while compiling the language decoder ONNX:
+
+```text
+/home/abhamidi/vlm_loop_bug/image_bug/Qwen3_5ForConditionalGeneration/
+  Qwen3_5DecoderWrapper-79c61908cff1731a/Qwen3_5DecoderWrapper.onnx
+```
+
+The compile command included `-sub-functions`, but the Loop condition issue was
+an ONNX Loop lowering/compiler contract issue, not a Python runtime issue.
+
+## Root Cause
+
+The Qwen3.5 gated-delta recurrence was rewritten to use `torch.while_loop` during
+Dynamo export. PyTorch exported the recurrence as ONNX `Loop` nodes inside the
+Dynamo decoder-layer subfunctions.
+
+Inspection of the exported ONNX showed:
+
+```text
+Top-level graph Loop nodes: 0
+FunctionProto count: 65
+Decoder-layer FunctionProto Loop nodes: 18
+Example Loop inputs: ['', 'val_185', 'zeros_4', 'arg11_1', 'zeros_3']
+```
+
+`Loop.input[0]` was empty, meaning no static max trip-count was emitted.
+`Loop.input[1]` was `val_185`, a graph-produced dynamic condition generated from
+the loop condition graph, equivalent to the recurrence condition
+`index < sequence_length`.
+
+QAIC currently requires the ONNX `Loop` initial condition input to be a
+compile-time constant. Because PyTorch emitted a dynamic value there, the
+compiler rejected the model before compiling the Loop body.
+
+This differs from the KV-blocking loop path in
+`/home/abhamidi/kv_blocking/efficient-transformers`, where the loop can use a
+static KV-block trip count (`num_kv_blocks`) for the fixed-CL decode target. For
+Qwen3.5 gated delta, the natural loop bound is sequence length, and PyTorch's
+`torch.while_loop` export still materializes the initial Loop condition as a
+dynamic graph value.
+
+## Secondary Issue Found After Fixing Loop Cond
+
+After manually patching the Loop initial condition to `Constant(True)`, the
+compiler progressed past the original failure and reported a new error:
+
+```text
+QAIC_ERROR:
+Error message: Found pre-existing PH by name past_key.3_RetainedState
+Unable to AddNodesToGraphFromModel
+```
+
+Root cause of the secondary issue:
+
+Some pass-through retained-state cache values were both graph inputs and graph
+outputs with the same name, for example:
+
+```text
+graph input:  past_key.3_RetainedState
+graph output: past_key.3_RetainedState
+```
+
+The compiler creates placeholders for graph IO and rejected the duplicate name.
+This was exposed only after the Loop condition issue was fixed.
+
+## Fix
+
+### 1. ConstantLoopConditionTransform
+
+Added `ConstantLoopConditionTransform` in:
+
+```text
+QEfficient/base/onnx_transforms.py
+```
+
+Behavior:
+
+```text
+- Walks the main ONNX graph.
+- Walks nested graph attributes.
+- Walks ONNX FunctionProto bodies, where Qwen3.5 decoder-layer Loops appear.
+- For every ONNX Loop node:
+  - creates a same-scope scalar BOOL Constant(True)
+  - rewrites Loop.input[1] to that constant
+```
+
+Important semantic detail:
+
+The transform changes only the Loop initial condition input. It does not replace
+the Loop body's continuation condition output. The body still returns the real
+runtime condition, so the recurrence still terminates according to the original
+exported condition.
+
+### 2. RetainedStateInputOutputNameTransform
+
+Added `RetainedStateInputOutputNameTransform` in:
+
+```text
+QEfficient/base/onnx_transforms.py
+```
+
+Behavior:
+
+```text
+- Detects graph inputs that also appear as graph outputs with the same
+  *_RetainedState name.
+- Renames the graph input to the base state name.
+  Example: past_key.3_RetainedState -> past_key.3
+- Inserts an Identity node:
+  Identity(past_key.3) -> past_key.3_RetainedState
+- Leaves the retained-state graph output name unchanged.
+```
+
+This gives the compiler distinct input/output placeholders while preserving the
+retained-state output expected by runtime/custom IO handling.
+
+### 3. Export Wiring
+
+Updated:
+
+```text
+QEfficient/utils/export_utils.py
+```
+
+The two transforms are appended for the Qwen3.5 Dynamo ONNX subfunction export
+path:
+
+```text
+dynamo=True
+use_onnx_subfunctions=True
+model module/name identifies qwen3_5
+```
+
+Also bumped:
+
+```text
+onnx_transform_version: 1 -> 2
+```
+
+This prevents the compile path from reusing an old cached ONNX export that does
+not include the new Loop/retained-state normalizations.
+
+## Validation
+
+Syntax and whitespace checks:
+
+```bash
+/home/abhamidi/kv_blocking/kv_env/bin/python -m py_compile   QEfficient/base/onnx_transforms.py   QEfficient/utils/export_utils.py
+
+git -C /home/abhamidi/vlm_loop_bug/efficient-transformers diff --check
+```
+
+Result:
+
+```text
+passed
+```
+
+Transform validation on the existing exported ONNX:
+
+```text
+RetainedStateInputOutputNameTransform applied: True
+ConstantLoopConditionTransform applied: True
+Loop nodes rewritten: 18
+Example rewritten Loop input: ['', 'qeff_loop_cond_true_0']
+past_key.3_RetainedState graph input removed: True
+past_key.3 graph input added: True
+```
+
+Compiler validation on the transformed ONNX with matching custom IO:
+
+```text
+Original error no longer occurs:
+  Loop operator cond input must be a constant
+
+Secondary PH error no longer occurs:
+  Found pre-existing PH by name past_key.3_RetainedState
+
+Final result:
+  Generated binary is present at .../qpc-qeff-loop-fixed-customio-test/qpc
+```
+
+## Why torch.while_loop Is Not Limited To Decode Here
+
+For the earlier KV-blocking implementation, `torch.while_loop` was limited to the
+Dynamo decode KV-blocking path because that loop iterates over KV cache blocks.
+The initial production target was a fixed-CL decode ONNX model, so the static
+maximum trip count is naturally `num_kv_blocks`. Prefill KV blocking has a
+larger surface area: query blocking, causal masks, possible nested q/kv loops,
+and more dynamic shape/mask cases. It can be implemented later, but it is not the
+same loop as the decode KV-block loop.
+
+For Qwen3.5 gated delta recurrence, the loop is different. It is a recurrence
+over sequence tokens in `QEffQwen3_5GatedDeltaNet`, and it is enabled whenever
+Dynamo is compiling that function. Therefore it can apply to prefill too. In
+prefill, the Loop iterates over the prefill sequence length. In decode, it
+usually iterates over one token. The gating condition is Dynamo compilation, not
+`prefill_only`.
+
+## Files Changed
+
+```text
+QEfficient/base/onnx_transforms.py
+QEfficient/utils/export_utils.py
+```
+
+Related earlier files in this working tree:
+
+```text
+QEfficient/transformers/models/qwen3_5/modeling_qwen3_5.py
+examples/image_text_to_text/models/qwen3_5/qwen3_5_dynamo_image.py
+```
+
+## End-to-End Command
+
+```bash
+cd /home/abhamidi/vlm_loop_bug/efficient-transformers
+/home/abhamidi/kv_blocking/kv_env/bin/python examples/image_text_to_text/models/qwen3_5/qwen3_5_dynamo_image.py   --model-id Qwen/Qwen3.5-0.8B   --image-url https://picsum.photos/id/237/536/354   --prompt "Describe all the colors seen in the image."   --prefill-seq-len 64   --ctx-len 4096   --height 354   --width 536   --generation-len 100   --num-cores 16   --num-devices 1
+```
+
+ONNX subfunctions are enabled by default in the example script unless
+`--disable-onnx-subfunctions` is passed.
+
+
+## Correctness Follow-Up: Prefill Loop Disabled
+
+A subsequent HF-vs-QAIC parity run showed that the model could compile but still
+produce incorrect generated tokens when the Qwen3.5 gated-delta recurrence was
+exported as an ONNX Loop for multi-token prefill.
+
+Observed QAIC output:
+
+```text
+QAIC decoded output:
+[' 🚨**CRITICAL SECURITY ALERT: YOU’RE ABOUT TO BURN"']
+```
+
+HF eager baseline for the same image/prompt produced normal image-description
+tokens, and the first generated token already differed:
+
+```text
+first_mismatch=batch=0 token=0 qaic=10838 hf=760
+```
+
+Because token 0 is selected from prefill logits, this points to a prefill-side
+runtime lowering issue rather than a later decode-only drift.
+
+A direct PyTorch comparison between the original chunked gated-delta path and the
+new token-recursive loop path with real Qwen3.5 dimensions matched within small
+floating point tolerance:
+
+```text
+output max abs diff: ~1.49e-07
+state max abs diff:  ~4.32e-07
+```
+
+So the Python/PyTorch recurrence math is equivalent. The incorrect model output
+is most likely caused by QAIC lowering/execution of the ONNX Loop body used for
+multi-token prefill, especially because that body carries a full output tensor
+and updates it with an indexed write pattern exported through ScatterND-style
+ops.
+
+Fix applied after this finding:
+
+```text
+QEfficient/transformers/models/qwen3_5/modeling_qwen3_5.py
+```
+
+The gated-delta `torch.while_loop` path is now decode-only:
+
+```text
+_is_dynamo_compiling() and query.shape[1] == 1
+```
+
+Multi-token prefill now uses the original chunked gated-delta implementation,
+which is the known-correct path. The loop can still be disabled completely for
+single-token decode by setting:
+
+```bash
+export QEFF_QWEN3_5_DISABLE_GATED_DELTA_LOOP=1
+```
+
+Recommended parity rerun after this change:
+
+```bash
+cd /home/abhamidi/vlm_loop_bug/efficient-transformers
+/home/abhamidi/kv_blocking/kv_env/bin/python examples/image_text_to_text/models/qwen3_5/qwen3_5_dynamo_image.py   --model-id Qwen/Qwen3.5-0.8B   --image-url https://picsum.photos/id/237/536/354   --prompt "Describe all the colors seen in the image."   --prefill-seq-len 64   --ctx-len 4096   --height 354   --width 536   --generation-len 8   --num-cores 16   --num-devices 1   --hf-parity   --no-streamer   --disable-mxfp6-matmul   --disable-mxint8-kv-cache
+```

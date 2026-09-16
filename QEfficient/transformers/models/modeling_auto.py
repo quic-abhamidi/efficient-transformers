@@ -1366,6 +1366,10 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
             self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
 
         qaic_config = kwargs.pop("qaic_config", getattr(self.model, "qaic_config", None))
+        onnx_transform_kwargs = dict(kwargs.get("onnx_transform_kwargs") or {})
+        if prefill_seq_len is not None:
+            onnx_transform_kwargs.setdefault("export_prefill_seq_len", int(prefill_seq_len))
+            onnx_transform_kwargs.setdefault("loop_trip_count", int(prefill_seq_len))
 
         if QEfficient.base.modeling_qeff.QEFFBaseModel._layerwise_active:
             return self._export_layerwise(
@@ -1382,6 +1386,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 num_cores=kwargs.get("num_cores", constants.DEFAULT_AIC_NUM_CORES),
                 qaic_config=qaic_config,
                 prefill_seq_len=prefill_seq_len,
+                onnx_transform_kwargs=onnx_transform_kwargs,
             )
         else:
             return self._export(
@@ -1391,6 +1396,7 @@ class QEffCausalLMForTextImageToTextModel(QEFFBaseModel):
                 export_dir=export_dir,
                 offload_pt_weights=offload_pt_weights,
                 use_onnx_subfunctions=kwargs.get("use_onnx_subfunctions", False),
+                onnx_transform_kwargs=onnx_transform_kwargs,
                 dynamo=kwargs.get("dynamo", False),
             )
 
@@ -1649,7 +1655,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 **kwargs,
             )
         bs: int = constants.ONNX_EXPORT_EXAMPLE_BATCH_SIZE
-        seq_len: int = constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN
+        seq_len: int = int(prefill_seq_len or constants.ONNX_EXPORT_EXAMPLE_SEQ_LEN)
         qaic_config = kwargs.get("qaic_config", getattr(self.lang_model.model, "qaic_config", None))
         # TODO: move this to a DA Serving utility class
         if self.model.config.model_type in SPECIALIZED_DISAGG_SERVING_MODEL_ARCH:
@@ -1658,6 +1664,10 @@ class _QEffAutoModelForImageTextToTextDualQPC:
             else:
                 self.__update_prefill_transform(False, retain_full_kv=kwargs.get("retain_full_kv", False))
         onnx_kwargs = {"prefill_seq_len": seq_len, "batch_size": bs}
+        # Include the concrete export sequence length in the language export hash.
+        # Without this, an older cached decoder ONNX traced at the default length
+        # can be reused while compile specializations request a different seq_len.
+        onnx_transform_kwargs = {"export_prefill_seq_len": seq_len}
         dynamic_axes_kwargs = {
             "kv_offload": True,
             "continuous_batching": self.continuous_batching,
@@ -1741,6 +1751,7 @@ class _QEffAutoModelForImageTextToTextDualQPC:
                 qaic_config=qaic_config,
                 _layerwise_cache_probe=layerwise_cache_probe,
                 kv_cache_prefix=kv_cache_prefix,
+                onnx_transform_kwargs=onnx_transform_kwargs,
                 dynamo=dynamo,
             )
         return self.onnx_path
@@ -2132,23 +2143,41 @@ class _QEffAutoModelForImageTextToTextDualQPC:
 
         needs_vision_export = not skip_vision and vision_onnx_path is None
         needs_lang_export = not skip_lang and lang_onnx_path is None
+        enable_qwen3_5_gated_delta_loop = (
+            dynamo
+            and needs_lang_export
+            and use_onnx_subfunctions
+            and prefill_only is not True
+            and prefill_seq_len != 1
+        )
 
         if needs_vision_export or needs_lang_export:
-            with export_from_compile():
-                self.export(
-                    use_onnx_subfunctions=use_onnx_subfunctions,
-                    skip_vision=skip_vision,
-                    skip_lang=skip_lang,
-                    prefill_only=prefill_only,
-                    enable_chunking=enable_chunking,
-                    prefill_seq_len=prefill_seq_len,
-                    num_cores=num_cores,
-                    qaic_config=qaic_config,
-                    _layerwise_cache_probe=layerwise_cache_probe,
-                    kv_cache_prefix=kv_cache_prefix,
-                    offload_pt_weights=offload_pt_weights,
-                    dynamo=dynamo,
-                )
+            previous_gated_delta_loop = os.environ.get("QEFF_QWEN3_5_ENABLE_GATED_DELTA_LOOP")
+            if enable_qwen3_5_gated_delta_loop:
+                os.environ["QEFF_QWEN3_5_ENABLE_GATED_DELTA_LOOP"] = "1"
+            else:
+                os.environ.pop("QEFF_QWEN3_5_ENABLE_GATED_DELTA_LOOP", None)
+            try:
+                with export_from_compile():
+                    self.export(
+                        use_onnx_subfunctions=use_onnx_subfunctions,
+                        skip_vision=skip_vision,
+                        skip_lang=skip_lang,
+                        prefill_only=prefill_only,
+                        enable_chunking=enable_chunking,
+                        prefill_seq_len=prefill_seq_len,
+                        num_cores=num_cores,
+                        qaic_config=qaic_config,
+                        _layerwise_cache_probe=layerwise_cache_probe,
+                        kv_cache_prefix=kv_cache_prefix,
+                        offload_pt_weights=offload_pt_weights,
+                        dynamo=dynamo,
+                    )
+            finally:
+                if previous_gated_delta_loop is None:
+                    os.environ.pop("QEFF_QWEN3_5_ENABLE_GATED_DELTA_LOOP", None)
+                else:
+                    os.environ["QEFF_QWEN3_5_ENABLE_GATED_DELTA_LOOP"] = previous_gated_delta_loop
             if layerwise_cache_probe:
                 return self.lang_model.onnx_path
 

@@ -19,10 +19,15 @@ from torch import nn
 from torch.export import Dim
 
 from QEfficient.base.onnx_transforms import (
+    ConstantLoopConditionTransform,
     CustomOpTransform,
+    DynamicAxesMetadataTransform,
+    InlineLoopSubfunctionsTransform,
     PreserveNestedCacheRetainedStateTransform,
+    Qwen3_5DecoderLayerDynamicSeqLenTransform,
     RenameFunctionOutputsTransform,
     RenameRepeatedSubgraphTransform,
+    RetainedStateInputOutputNameTransform,
     RenameWsubNodesTransform,
 )
 from QEfficient.transformers.cache_utils import InvalidIndexProvider
@@ -404,7 +409,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
         {
             "config": config_val,
             "use_onnx_subfunctions": getattr(qeff_model, "_use_onnx_subfunctions", False),
-            "onnx_transform_version": 1,
+            "onnx_transform_version": 12,
             "dynamo": all_args.get("dynamo", False),
         }
     )
@@ -498,6 +503,20 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
             qeff_model._onnx_transforms.append(PreserveNestedCacheRetainedStateTransform)
         if RenameRepeatedSubgraphTransform not in qeff_model._onnx_transforms:
             qeff_model._onnx_transforms.append(RenameRepeatedSubgraphTransform)
+
+        model_module = getattr(qeff_model.model.__class__, "__module__", "")
+        model_name = getattr(qeff_model, "model_name", "") or ""
+        if "qwen3_5" in model_module or "Qwen3.5" in model_name or "Qwen3_5" in model_name:
+            if DynamicAxesMetadataTransform not in qeff_model._onnx_transforms:
+                qeff_model._onnx_transforms.append(DynamicAxesMetadataTransform)
+            if Qwen3_5DecoderLayerDynamicSeqLenTransform not in qeff_model._onnx_transforms:
+                qeff_model._onnx_transforms.append(Qwen3_5DecoderLayerDynamicSeqLenTransform)
+            if InlineLoopSubfunctionsTransform not in qeff_model._onnx_transforms:
+                qeff_model._onnx_transforms.append(InlineLoopSubfunctionsTransform)
+            if RetainedStateInputOutputNameTransform not in qeff_model._onnx_transforms:
+                qeff_model._onnx_transforms.append(RetainedStateInputOutputNameTransform)
+            if ConstantLoopConditionTransform not in qeff_model._onnx_transforms:
+                qeff_model._onnx_transforms.append(ConstantLoopConditionTransform)
     else:
         # TorchScript: RenameFunctionOutputsTransform + CustomOpTransform.
         if RenameFunctionOutputsTransform not in qeff_model._onnx_transforms:
@@ -519,6 +538,10 @@ def _setup_onnx_subfunctions(qeff_model, args, kwargs, dynamo=False):
             onnx_transform_kwargs["target_class_modules"] = {
                 cls.__name__: cls.__module__ for cls in decoder_layer_classes
             }
+            if "loop_trip_count" not in onnx_transform_kwargs:
+                prefill_seq_len = kwargs.get("prefill_seq_len")
+                if prefill_seq_len is not None:
+                    onnx_transform_kwargs["loop_trip_count"] = int(prefill_seq_len)
             kwargs["onnx_transform_kwargs"] = onnx_transform_kwargs
         else:
             # TorchScript path: pass class objects for export_modules_as_functions

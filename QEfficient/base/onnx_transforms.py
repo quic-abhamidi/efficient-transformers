@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------------
 
+import copy
 import logging
 import os
 import re
@@ -615,6 +616,435 @@ class RenameWsubNodesTransform(BaseOnnxTransform):
         return transformed
 
 
+class DynamicAxesMetadataTransform(BaseOnnxTransform):
+    """Restore symbolic graph input/output dimensions from QEff dynamic_axes metadata.
+
+    Dynamo export can materialize static dimensions in model inputs even when
+    torch.export dynamic_shapes were provided. QAIC network specializations are
+    keyed by ONNX symbolic dimensions, so restore those dim_param names from the
+    same dynamic_axes map used by the legacy exporter.
+    """
+
+    @classmethod
+    def apply(cls, model: ModelProto, dynamic_axes: Optional[Dict[str, Dict[int, str]]] = None, **kwargs) -> bool:
+        if not dynamic_axes:
+            return False
+
+        def iter_value_infos():
+            yield from model.graph.input
+            yield from model.graph.output
+            yield from model.graph.value_info
+
+        value_infos = {value_info.name: value_info for value_info in iter_value_infos()}
+        transformed = False
+
+        for value_name, axes in dynamic_axes.items():
+            value_info = value_infos.get(value_name)
+            if value_info is None or not value_info.type.HasField("tensor_type"):
+                continue
+            shape = value_info.type.tensor_type.shape
+            for axis, dim_name in axes.items():
+                if axis >= len(shape.dim):
+                    continue
+                dim = shape.dim[axis]
+                if dim.dim_param == dim_name:
+                    continue
+                if dim.HasField("dim_value"):
+                    dim.ClearField("dim_value")
+                dim.dim_param = dim_name
+                transformed = True
+
+        return transformed
+
+
+class Qwen3_5DecoderLayerDynamicSeqLenTransform(BaseOnnxTransform):
+    """Make Qwen3.5 decoder-layer subfunction reshape shapes use runtime seq_len.
+
+    Dynamo emits ONNX local functions for repeated decoder layers. In a combined
+    Prefill+Decode language QPC, those function bodies are traced with the
+    prefill example length, so some reshape shape tensors contain a literal
+    ``prefill_seq_len``. QAIC then reuses the same function body for the Decode
+    specialization and fails on reshapes like ``[batch, 64, -1]`` when the input
+    sequence length is 1.
+
+    Only source-marked sequence-length reshape constants are rewritten. Gated
+    delta chunk-size constants also happen to be 64 and must remain static.
+    """
+
+    _TARGET_PREFIX = "QEffQwen3_5DecoderLayer"
+    _SEQ_LEN_STACK_PATTERNS = (
+        "reshape(batch_size, seq_len",
+        "reshape(*input_shape",
+    )
+    _CHUNK_STACK_PATTERNS = (
+        "chunk_size",
+        "zeros = torch.zeros(g.shape",
+        "qkv_zeros = torch.zeros(key.shape",
+    )
+
+    @staticmethod
+    def _metadata_text(node) -> str:
+        return "\n".join(prop.value for prop in node.metadata_props)
+
+    @classmethod
+    def _is_prefill_seq_len_constant(cls, node, export_prefill_seq_len: int) -> bool:
+        if node.op_type != "Constant" or len(node.output) != 1:
+            return False
+        has_target_value = False
+        for attr in node.attribute:
+            if attr.name == "value_ints" and list(attr.ints) == [export_prefill_seq_len]:
+                has_target_value = True
+                break
+            if attr.name == "value" and list(attr.t.dims) == [1]:
+                try:
+                    arr = numpy_helper.to_array(attr.t)
+                except Exception:
+                    continue
+                if arr.size == 1 and int(arr.reshape(-1)[0]) == export_prefill_seq_len:
+                    has_target_value = True
+                    break
+        if not has_target_value:
+            return False
+
+        metadata = cls._metadata_text(node)
+        if any(pattern in metadata for pattern in cls._CHUNK_STACK_PATTERNS):
+            return False
+        return any(pattern in metadata for pattern in cls._SEQ_LEN_STACK_PATTERNS)
+
+    @classmethod
+    def apply(cls, model: ModelProto, *, export_prefill_seq_len: Optional[int] = None, **kwargs) -> bool:
+        if export_prefill_seq_len is None:
+            return False
+        export_prefill_seq_len = int(export_prefill_seq_len)
+        transformed = False
+
+        for function in model.functions:
+            if not function.name.startswith(cls._TARGET_PREFIX) or len(function.input) < 2:
+                continue
+
+            replacements = [
+                node for node in function.node if cls._is_prefill_seq_len_constant(node, export_prefill_seq_len)
+            ]
+            if not replacements:
+                continue
+
+            hidden_states_name = function.input[1]
+            axis_name = f"qeff_{function.name}_seq_axis"
+            shape_name = f"qeff_{function.name}_hidden_shape"
+            seq_len_name = f"qeff_{function.name}_seq_len"
+            prefix_nodes = [
+                onnx.helper.make_node("Constant", [], [axis_name], value_ints=[1]),
+                onnx.helper.make_node("Shape", [hidden_states_name], [shape_name]),
+                onnx.helper.make_node("Gather", [shape_name, axis_name], [seq_len_name], axis=0),
+            ]
+
+            for node in replacements:
+                original_output = node.output[0]
+                del node.input[:]
+                node.input.extend([seq_len_name])
+                del node.attribute[:]
+                node.op_type = "Identity"
+                node.domain = ""
+                node.name = f"{node.name}_dynamic_seq_len"
+                del node.output[:]
+                node.output.extend([original_output])
+
+            existing_nodes = list(function.node)
+            del function.node[:]
+            function.node.extend(prefix_nodes)
+            function.node.extend(existing_nodes)
+            transformed = True
+
+        return transformed
+
+
+
+
+class InlineLoopSubfunctionsTransform(BaseOnnxTransform):
+    """Inline local ONNX functions that contain Loop nodes.
+
+    QAIC accepts ``-sub-functions`` for the surrounding model, but Qwen3.5 gated
+    delta currently produces incorrect runtime results when an ONNX Loop is
+    nested inside a local function body. This pass leaves normal subfunctions in
+    place and expands only the function-call nodes whose target function contains
+    a Loop.
+    """
+
+    @staticmethod
+    def _contains_loop_in_nodes(nodes) -> bool:
+        for node in nodes:
+            if node.op_type == "Loop":
+                return True
+            for attr in node.attribute:
+                if attr.HasField("g") and InlineLoopSubfunctionsTransform._contains_loop_in_nodes(attr.g.node):
+                    return True
+                for nested_graph in attr.graphs:
+                    if InlineLoopSubfunctionsTransform._contains_loop_in_nodes(nested_graph.node):
+                        return True
+        return False
+
+    @staticmethod
+    def _remap_graph_names(graph, name_map, prefix: str) -> None:
+        def remap(name: str) -> str:
+            if not name:
+                return name
+            if name in name_map:
+                return name_map[name]
+            new_name = f"{prefix}_{name}"
+            name_map[name] = new_name
+            return new_name
+
+        for graph_input in graph.input:
+            graph_input.name = remap(graph_input.name)
+        for graph_output in graph.output:
+            graph_output.name = remap(graph_output.name)
+        for value_info in graph.value_info:
+            value_info.name = remap(value_info.name)
+        for initializer in graph.initializer:
+            initializer.name = remap(initializer.name)
+        for node in graph.node:
+            node.input[:] = [remap(name) for name in node.input]
+            node.output[:] = [remap(name) for name in node.output]
+            if node.name:
+                node.name = f"{prefix}_{node.name}"
+            for attr in node.attribute:
+                if attr.HasField("g"):
+                    InlineLoopSubfunctionsTransform._remap_graph_names(attr.g, name_map, prefix)
+                for nested_graph in attr.graphs:
+                    InlineLoopSubfunctionsTransform._remap_graph_names(nested_graph, name_map, prefix)
+
+    @classmethod
+    def _inline_graph(cls, graph, loop_functions: Dict[Tuple[str, str], Any], prefix_seed: str) -> bool:
+        changed = False
+        new_nodes = []
+        call_index = 0
+
+        for node in graph.node:
+            for attr in node.attribute:
+                if attr.HasField("g"):
+                    changed |= cls._inline_graph(attr.g, loop_functions, f"{prefix_seed}_{node.name or node.op_type}")
+                for nested_graph in attr.graphs:
+                    changed |= cls._inline_graph(nested_graph, loop_functions, f"{prefix_seed}_{node.name or node.op_type}")
+
+            function = loop_functions.get((node.domain, node.op_type))
+            if function is None:
+                new_nodes.append(node)
+                continue
+
+            prefix = f"qeff_inline_{prefix_seed}_{call_index}_{node.name or node.op_type}"
+            name_map = {formal: actual for formal, actual in zip(function.input, node.input)}
+            name_map.update({formal: actual for formal, actual in zip(function.output, node.output)})
+
+            for function_node in function.node:
+                inlined_node = copy.deepcopy(function_node)
+
+                def remap(name: str) -> str:
+                    if not name:
+                        return name
+                    if name in name_map:
+                        return name_map[name]
+                    new_name = f"{prefix}_{name}"
+                    name_map[name] = new_name
+                    return new_name
+
+                inlined_node.input[:] = [remap(name) for name in inlined_node.input]
+                inlined_node.output[:] = [remap(name) for name in inlined_node.output]
+                if inlined_node.name:
+                    inlined_node.name = f"{prefix}_{inlined_node.name}"
+                for attr in inlined_node.attribute:
+                    if attr.HasField("g"):
+                        cls._remap_graph_names(attr.g, name_map, prefix)
+                    for nested_graph in attr.graphs:
+                        cls._remap_graph_names(nested_graph, name_map, prefix)
+                new_nodes.append(inlined_node)
+
+            changed = True
+            call_index += 1
+
+        if changed:
+            del graph.node[:]
+            graph.node.extend(new_nodes)
+        return changed
+
+    @classmethod
+    def apply(cls, model: ModelProto, **kwargs) -> bool:
+        loop_functions = {
+            (function.domain, function.name): function
+            for function in model.functions
+            if cls._contains_loop_in_nodes(function.node)
+        }
+        if not loop_functions:
+            return False
+
+        transformed = cls._inline_graph(model.graph, loop_functions, model.graph.name or "graph")
+        if transformed:
+            kept_functions = [
+                function for function in model.functions if (function.domain, function.name) not in loop_functions
+            ]
+            del model.functions[:]
+            model.functions.extend(kept_functions)
+        return transformed
+
+class RetainedStateInputOutputNameTransform(BaseOnnxTransform):
+    """Split pass-through retained-state graph input/output names.
+
+    Some dynamo exports leave a retained-state graph output backed directly by a
+    graph input with the same ``*_RetainedState`` name. The compiler creates one
+    placeholder per graph input/output, so the shared name is rejected as a
+    pre-existing placeholder. Rename the graph input back to the base state name
+    and insert an Identity producing the retained-state output name.
+    """
+
+    @classmethod
+    def apply(cls, model: ModelProto, **kwargs) -> bool:
+        graph = model.graph
+        produced_names = {output for node in graph.node for output in node.output if output}
+        graph_output_names = {output.name for output in graph.output}
+        rename_map: Dict[str, str] = {}
+        identity_nodes = []
+
+        for graph_input in graph.input:
+            old_name = graph_input.name
+            if not old_name.endswith("_RetainedState") or old_name not in graph_output_names:
+                continue
+            if old_name in produced_names:
+                continue
+            new_name = old_name[: -len("_RetainedState")]
+            if not new_name:
+                continue
+            rename_map[old_name] = new_name
+            graph_input.name = new_name
+            identity_nodes.append(onnx.helper.make_node("Identity", [new_name], [old_name], f"{new_name}_identity"))
+
+        if not rename_map:
+            return False
+
+        def rename_inputs_in_nodes(nodes) -> None:
+            for node in nodes:
+                node.input[:] = [rename_map.get(name, name) for name in node.input]
+                for attr in node.attribute:
+                    if attr.HasField("g"):
+                        rename_inputs_in_nodes(attr.g.node)
+                    for nested_graph in attr.graphs:
+                        rename_inputs_in_nodes(nested_graph.node)
+
+        for value_info in graph.value_info:
+            if value_info.name in rename_map:
+                value_info.name = rename_map[value_info.name]
+        rename_inputs_in_nodes(graph.node)
+
+        existing_nodes = list(graph.node)
+        del graph.node[:]
+        graph.node.extend(identity_nodes)
+        graph.node.extend(existing_nodes)
+        return True
+
+
+class ConstantLoopConditionTransform(BaseOnnxTransform):
+    """Rewrite ONNX Loop control inputs into compiler-friendly constants.
+
+    ``torch.while_loop`` exports the ONNX Loop initial condition as a graph
+    value produced by the loop condition graph. The AIC compiler requires this
+    Loop input to be a compile-time constant. When a static loop trip count is
+    provided, this transform also fills Loop.input[0] so the compiler sees a
+    bounded loop. The Loop body still returns the real per-iteration continuation
+    condition, so runtime termination semantics are preserved.
+    """
+
+    @classmethod
+    def apply(cls, model: ModelProto, *, loop_trip_count: Optional[int] = None, **kwargs) -> bool:
+        transformed = False
+        loop_index = 0
+
+        def next_names() -> Tuple[Optional[str], str]:
+            nonlocal loop_index
+            trip_name = f"qeff_loop_trip_count_{loop_index}" if loop_trip_count is not None else None
+            cond_name = f"qeff_loop_cond_true_{loop_index}"
+            loop_index += 1
+            return trip_name, cond_name
+
+        def make_trip_tensor(name: str) -> TensorProto:
+            return onnx.helper.make_tensor(name, TensorProto.INT64, [], [int(loop_trip_count)])
+
+        def make_cond_tensor(name: str) -> TensorProto:
+            return onnx.helper.make_tensor(name, TensorProto.BOOL, [], [True])
+
+        def rewrite_loop_node(node, trip_name: Optional[str], cond_name: str) -> bool:
+            if len(node.input) < 2:
+                logger.warning(
+                    "ConstantLoopConditionTransform: Loop node '%s' has fewer than 2 inputs; skipping.", node.name
+                )
+                return False
+            if trip_name is not None:
+                node.input[0] = trip_name
+            node.input[1] = cond_name
+            return True
+
+        def rewrite_graph(graph) -> bool:
+            graph_changed = False
+            initializer_names = {initializer.name for initializer in graph.initializer}
+
+            def add_initializer_once(name: str, tensor: Optional[TensorProto] = None) -> None:
+                if name not in initializer_names:
+                    graph.initializer.append(tensor if tensor is not None else make_cond_tensor(name))
+                    initializer_names.add(name)
+
+            for node in graph.node:
+                for attr in node.attribute:
+                    if attr.HasField("g"):
+                        graph_changed |= rewrite_graph(attr.g)
+                    for nested_graph in attr.graphs:
+                        graph_changed |= rewrite_graph(nested_graph)
+
+                if node.op_type != "Loop":
+                    continue
+                trip_name, cond_name = next_names()
+                if trip_name is not None:
+                    add_initializer_once(trip_name, make_trip_tensor(trip_name))
+                add_initializer_once(cond_name)
+                graph_changed |= rewrite_loop_node(node, trip_name, cond_name)
+            return graph_changed
+
+        def rewrite_function(function) -> bool:
+            function_changed = False
+            constant_nodes = []
+            for node in function.node:
+                for attr in node.attribute:
+                    if attr.HasField("g"):
+                        function_changed |= rewrite_graph(attr.g)
+                    for nested_graph in attr.graphs:
+                        function_changed |= rewrite_graph(nested_graph)
+
+                if node.op_type != "Loop":
+                    continue
+                trip_name, cond_name = next_names()
+                if trip_name is not None:
+                    constant_nodes.append(
+                        onnx.helper.make_node(
+                            "Constant", [], [trip_name], value=make_trip_tensor(f"{trip_name}_value")
+                        )
+                    )
+                constant_nodes.append(
+                    onnx.helper.make_node(
+                        "Constant", [], [cond_name], value=make_cond_tensor(f"{cond_name}_value")
+                    )
+                )
+                function_changed |= rewrite_loop_node(node, trip_name, cond_name)
+
+            if constant_nodes:
+                existing_nodes = list(function.node)
+                del function.node[:]
+                function.node.extend(constant_nodes)
+                function.node.extend(existing_nodes)
+            return function_changed
+
+        transformed |= rewrite_graph(model.graph)
+        for function in model.functions:
+            transformed |= rewrite_function(function)
+
+        return transformed
+
+
 class OnnxTransformPipeline(BaseOnnxTransform):
     """Pipeline to apply multiple ONNX transformations in sequence."""
 
@@ -691,11 +1121,28 @@ class OnnxTransformPipeline(BaseOnnxTransform):
         if RenameWsubNodesTransform in requested:
             applied[RenameWsubNodesTransform] = RenameWsubNodesTransform.apply(model)
 
+        if DynamicAxesMetadataTransform in requested:
+            applied[DynamicAxesMetadataTransform] = DynamicAxesMetadataTransform.apply(model, **kwargs)
+
         if PreserveNestedCacheRetainedStateTransform in requested:
             applied[PreserveNestedCacheRetainedStateTransform] = PreserveNestedCacheRetainedStateTransform.apply(model)
 
         if RenameRepeatedSubgraphTransform in requested:
             applied[RenameRepeatedSubgraphTransform] = RenameRepeatedSubgraphTransform.apply(model, **kwargs)
+
+        if Qwen3_5DecoderLayerDynamicSeqLenTransform in requested:
+            applied[Qwen3_5DecoderLayerDynamicSeqLenTransform] = Qwen3_5DecoderLayerDynamicSeqLenTransform.apply(
+                model, **kwargs
+            )
+
+        if InlineLoopSubfunctionsTransform in requested:
+            applied[InlineLoopSubfunctionsTransform] = InlineLoopSubfunctionsTransform.apply(model, **kwargs)
+
+        if RetainedStateInputOutputNameTransform in requested:
+            applied[RetainedStateInputOutputNameTransform] = RetainedStateInputOutputNameTransform.apply(model, **kwargs)
+
+        if ConstantLoopConditionTransform in requested:
+            applied[ConstantLoopConditionTransform] = ConstantLoopConditionTransform.apply(model, **kwargs)
 
         if AdapterWeightsToInputsTransform in requested:
             applied[AdapterWeightsToInputsTransform] = AdapterWeightsToInputsTransform.apply(model, **kwargs)

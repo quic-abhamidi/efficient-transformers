@@ -615,7 +615,7 @@ class QEFFBaseModel(ABC):
             transform_kwargs = {
                 "onnx_base_dir": str(export_dir) if needs_external_tensor_data else None,
                 "model_name": self.model_name,
-                "dynamic_axes": None if dynamo else dynamic_axes,
+                "dynamic_axes": dynamic_axes,
                 "onnx_export_opset": constants.get_onnx_export_opset(dynamo),
             }
             if onnx_transform_kwargs is not None:
