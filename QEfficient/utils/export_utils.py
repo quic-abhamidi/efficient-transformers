@@ -409,7 +409,7 @@ def _generate_export_hash(qeff_model, args, kwargs, func):
         {
             "config": config_val,
             "use_onnx_subfunctions": getattr(qeff_model, "_use_onnx_subfunctions", False),
-            "onnx_transform_version": 12,
+            "onnx_transform_version": 17,
             "dynamo": all_args.get("dynamo", False),
         }
     )

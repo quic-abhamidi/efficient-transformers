@@ -470,7 +470,8 @@ def qeff_torch_causal_conv1d_update(
     # updated_conv_state = hidden_states_new[:, :, -state_len:].to(hidden_states_new.dtype)
     # updated_conv_state = hidden_states_new[:, :, position_ids[0].argmax(1) + 1: position_ids[0].argmax(1) + state_len].to(hidden_states_new.dtype)
     out = F.conv1d(hidden_states_new, weight.unsqueeze(1), bias, padding=0, groups=hidden_size)
-    out = F.silu(out[:, :, -seq_len:]).to(hidden_states.dtype)
+    out_start = out.shape[-1] - seq_len
+    out = F.silu(out[:, :, out_start:]).to(hidden_states.dtype)
     return out, updated_conv_state
 
 
