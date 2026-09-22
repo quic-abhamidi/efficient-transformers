@@ -26,6 +26,8 @@ from QEfficient.base.onnx_transforms import (
     CustomOpTransform,
     FP16ClipTransform,
     LocalizeFunctionReduceSumAxesTransform,
+    InlineTorchSubgraphFunctionsTransform,
+    StaticLoopInputsTransform,
     OnnxTransformPipeline,
     RenameFunctionOutputsTransform,
     SplitTensorsTransform,
@@ -103,6 +105,102 @@ def _restore_retained_state_output_names(model: onnx.ModelProto, output_names: L
             continue
         if current_name.isdigit() or "_InternalRetainedState" in current_name or "_RetainedState" in current_name:
             _rename_graph_value(model.graph, current_name, expected_name)
+
+
+def _normalize_retained_state_kv_inputs(model: onnx.ModelProto) -> bool:
+    """Normalize accidentally suffixed KV inputs for QAIC retained-state pairing."""
+    graph = model.graph
+    output_names = {value.name for value in graph.output}
+    input_names = {value.name for value in graph.input}
+    rename_map = {}
+    for value in graph.input:
+        name = value.name
+        suffix = "_RetainedState"
+        if not name.endswith(suffix):
+            continue
+        stem = name[: -len(suffix)]
+        if not (stem.startswith("past_key.") or stem.startswith("past_value.")):
+            continue
+        if not stem.split(".", 1)[1].isdigit():
+            continue
+        if name in output_names and stem not in input_names:
+            rename_map[name] = stem
+    for value in graph.input:
+        if value.name in rename_map:
+            value.name = rename_map[value.name]
+    for node in graph.node:
+        node.input[:] = [rename_map.get(name, name) for name in node.input]
+    for value in graph.value_info:
+        if value.name in rename_map:
+            value.name = rename_map[value.name]
+
+    # Dynamo may leave the graph output renamed while the producing scatter
+    # node keeps an internal name (for example ``ctx_scatter``). QAIC requires
+    # the retained-state name on the actual producer output, not only on the
+    # GraphProto output ValueInfo.
+    produced_names = {name for node in graph.node for name in node.output if name}
+    output_repairs = {}
+    scatter_types = {"CtxScatter", "CtxScatterCB", "CtxScatter3D", "CtxScatter3DInt", "CtxScatterCB3D"}
+    for output in graph.output:
+        output_name = output.name
+        if not output_name.endswith("_RetainedState") or output_name in produced_names:
+            continue
+        stem = output_name[:-len("_RetainedState")]
+        if not (stem.startswith("past_key.") or stem.startswith("past_value.")):
+            continue
+        for node in graph.node:
+            if node.op_type not in scatter_types or not node.output:
+                continue
+            if stem in node.input:
+                old_name = node.output[0]
+                if old_name != output_name:
+                    node.output[0] = output_name
+                    output_repairs[old_name] = output_name
+                break
+
+    # Also repair references emitted by Loop bodies. The Dynamo exporter may
+    # have already renamed the top-level producer, while nested body nodes
+    # still refer to its former ``.../ctx_scatter[_1]`` value.
+    reference_repairs = dict(output_repairs)
+    for node in graph.node:
+        if node.op_type not in scatter_types or not node.output:
+            continue
+        output_name = node.output[0]
+        if not output_name.endswith("_RetainedState") or "/node_" not in node.name:
+            continue
+        prefix, local_name = node.name.rsplit("/", 1)
+        old_name = f"{prefix}/{local_name[len('node_') :]}"
+        if old_name != output_name:
+            reference_repairs[old_name] = output_name
+
+    if reference_repairs:
+        def rewrite_nodes(nodes):
+            for node in nodes:
+                node.input[:] = [reference_repairs.get(name, name) for name in node.input]
+                for attribute in node.attribute:
+                    if attribute.HasField("g"):
+                        rewrite_graph(attribute.g)
+                    for nested_graph in attribute.graphs:
+                        rewrite_graph(nested_graph)
+
+        def rewrite_graph(target_graph):
+            rewrite_nodes(target_graph.node)
+            for value in target_graph.value_info:
+                if value.name in reference_repairs:
+                    value.name = reference_repairs[value.name]
+
+        rewrite_graph(graph)
+        for function in model.functions:
+            rewrite_nodes(function.node)
+
+    if not rename_map and not reference_repairs:
+        return False
+    logger.warning(
+        "Normalized retained-state KV inputs/outputs for QAIC: %d inputs, %d outputs",
+        len(rename_map),
+        len(output_repairs),
+    )
+    return True
 
 
 def _restore_output_names_exact(model: onnx.ModelProto, output_names: List[str]) -> None:
@@ -617,11 +715,27 @@ class QEFFBaseModel(ABC):
             logger.info("PyTorch export successful")
             self.weight_spec_path = str(export_result.weight_spec_path) if export_result.weight_spec_path else None
             model = onnx.load(export_result.onnx_path, load_external_data=False)
+            _normalize_retained_state_kv_inputs(model)
 
             excluded_transforms = set(export_result.excluded_onnx_transforms)
             active_transforms = [
                 transform for transform in self._onnx_transforms if transform not in excluded_transforms
             ]
+            qaic_config_for_transforms = (
+                export_kwargs.get("qaic_config") or self.hash_params.get("qaic_config")
+                or getattr(self.model, "qaic_config", None) or {}
+            )
+            # if (
+            #     dynamo and qaic_config_for_transforms.get("blocking_mode") == "kv_headpar"
+            #     and qaic_config_for_transforms.get("use_kv_loop_op", True)
+            #     and not qaic_config_for_transforms.get("kv_loop_dynamic_trip_count", False)
+            #     and qaic_config_for_transforms.get("num_kv_blocks") is not None
+            # ):
+            #     # if (export_kwargs.get("use_onnx_subfunctions", False) or getattr(self, "_use_onnx_subfunctions", False)) and InlineTorchSubgraphFunctionsTransform not in active_transforms:
+            #     #     active_transforms.append(InlineTorchSubgraphFunctionsTransform)
+            #     if StaticLoopInputsTransform not in active_transforms:
+
+            #         active_transforms.append(StaticLoopInputsTransform)
             needs_external_tensor_data = any(
                 transform in active_transforms for transform in (FP16ClipTransform, SplitTensorsTransform)
             )
@@ -630,6 +744,7 @@ class QEFFBaseModel(ABC):
                 "model_name": self.model_name,
                 "dynamic_axes": None if dynamo else dynamic_axes,
                 "onnx_export_opset": constants.get_onnx_export_opset(dynamo),
+                "num_kv_blocks": qaic_config_for_transforms.get("num_kv_blocks"),
             }
             if onnx_transform_kwargs is not None:
                 transform_kwargs.update(onnx_transform_kwargs)
@@ -642,6 +757,11 @@ class QEFFBaseModel(ABC):
             # remains backward compatible.
             if QEFFBaseModel._layerwise_active:
                 _restore_retained_state_output_names(model, output_names)
+
+            # Inlining/renaming transforms can recreate internal scatter output
+            # names. Normalize once more after the complete transform pipeline,
+            # immediately before serializing the model consumed by QAIC.
+            _normalize_retained_state_kv_inputs(model)
 
             transform_names = [transform.__name__ for transform in self._pytorch_transforms + active_transforms]
             model.metadata_props.append(
@@ -724,6 +844,7 @@ class QEFFBaseModel(ABC):
             bs=bs,
             num_devices=num_devices,
             qaic_config=qaic_config,
+            dynamo=dynamo,
             prefill_only=prefill_only,
             enable_chunking=enable_chunking,
             num_cores=kwargs.get("num_cores", compiler_options.get("aic_num_cores", constants.DEFAULT_AIC_NUM_CORES)),

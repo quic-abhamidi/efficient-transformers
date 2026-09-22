@@ -22,6 +22,7 @@ from QEfficient.blocking.blocked_attention_forwards import (
     blocked_kv_attention_forward,
     blocked_kv_attention_forward_decode_headpar_batch,
     blocked_kv_attention_forward_headpar_offline,
+    blocked_kv_attention_forward_headpar_offline_loop,
     blocked_kv_attention_forward_prefill_headpar_offline,
     blocked_kv_mla_attention_forward,
     blocked_q_attention_forward,
@@ -131,7 +132,7 @@ class AttentionBlockingConfig:
     num_kv_blocks: Optional[int] = None
     num_q_blocks: Optional[int] = None
     head_block_size: Optional[int] = None
-    skip_kv: Optional[bool] = True
+    skip_kv: Optional[bool] = False
     num_batch_blocks: Optional[int] = None
     gdn_num_head_blocks: Optional[int] = None
     headpar_split: Optional[int] = None
@@ -139,6 +140,8 @@ class AttentionBlockingConfig:
     n_rep_chunk: Optional[int] = 1
     ctx_len: Optional[int] = None
     kv_block_unroll: Optional[int] = 1
+    use_kv_loop_op: Optional[bool] = False
+    kv_loop_dynamic_trip_count: Optional[bool] = False
 
 
 def get_gdn_num_head_blocks(blocking_config: Optional[AttentionBlockingConfig], batch_fold: bool) -> int:
@@ -352,9 +355,15 @@ def generic_blocked_attention_interface(
 ):
     blocking_mode = BlockingMode.resolve(blocking_config.mode)
     prefill_only = prefill_only or blocking_mode.is_prefill
-    strategy = _STRATEGIES[
-        BlockingMode.get_final_mode(blocking_config, prefill_only=prefill_only, is_mla=is_mla, mla_kwargs=mla_kwargs)
-    ]
+    mode = BlockingMode.get_final_mode(
+        blocking_config, prefill_only=prefill_only, is_mla=is_mla, mla_kwargs=mla_kwargs
+    )
+    strategy = _STRATEGIES[mode]
+    loop_split = blocking_config.headpar_split
+    if mode in {BlockingMode.KV, BlockingMode.KV_HEADPAR} and blocking_config.use_kv_loop_op:
+        strategy = blocked_kv_attention_forward_headpar_offline_loop
+        # KV mode is the split=1 specialization of the head-parallel loop.
+        loop_split = 1 if mode == BlockingMode.KV else blocking_config.headpar_split
 
     cache_kwargs = {"position_ids": position_ids, "batch_index": batch_index}
 
@@ -417,9 +426,10 @@ def generic_blocked_attention_interface(
         num_q_blocks=blocking_config.num_q_blocks,
         head_block_size=blocking_config.head_block_size,
         num_batch_blocks=blocking_config.num_batch_blocks,
-        configured_split=blocking_config.headpar_split,
+        configured_split=loop_split,
         ctx_len=blocking_config.ctx_len,
         kv_block_unroll=blocking_config.kv_block_unroll,
+        kv_loop_dynamic_trip_count=blocking_config.kv_loop_dynamic_trip_count or False,
         skip_kv=blocking_config.skip_kv or False,
         # prefill-specific
         n_rep_chunk=blocking_config.n_rep_chunk,

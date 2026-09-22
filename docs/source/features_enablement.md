@@ -124,3 +124,33 @@ dlm.compile()
 ```
 
 The `qaic_config` dictionary is fed during the instantiation of the model because slight changes to the ONNX graph are required. Once complete, the user can specify `num_speculative_tokens` to define the actual number of speculations that the TLM will take as input during the decode phase. As for the DLM, no new changes are required at the ONNX or compile level.
+
+## Dynamo `torch.while_loop` KV blocking
+
+For fixed-context decode, Dynamo `kv_headpar` blocking can represent KV-block iteration as `torch.while_loop`, which exports to one ONNX `Loop` per eligible decoder layer. Enable it with:
+
+```python
+qaic_config = {
+    "blocking_mode": "kv_headpar",
+    "num_kv_blocks": 64,
+    "headpar_split": 2,
+}
+qeff_model.compile(
+    dynamo=True,
+    qaic_config=qaic_config,
+    use_onnx_subfunctions=True,
+)
+```
+
+Dynamo enables `use_kv_loop_op` automatically for `kv_headpar`; set `use_kv_loop_op=False` to retain the Python block loop. Set `kv_loop_dynamic_trip_count=True` when the runtime live-block count must control the loop. Fixed-trip-count exports also apply `StaticLoopInputsTransform`, replacing the ONNX loop controls with `num_kv_blocks` and `True`. With ONNX subfunctions enabled, `InlineTorchSubgraphFunctionsTransform` moves PyTorch-generated `pkg.torch.__subgraph__` loop helpers into the caller graph while preserving QEfficient custom-op functions.
+
+The loop path falls back to the existing implementation for sliding-window attention, position bias, batch-indexed caches, missing head-parallel split configuration, and incompatible context/block dimensions. Other blocking modes are unchanged.
+
+Validation:
+
+```bash
+pytest tests/dynamo/test_kv_blocking_loop.py
+pytest tests/dynamo/test_kv_blocking_loop_tiny_on_qaic.py
+```
+
+The second suite is QAIC- and model-download-gated. Its end-to-end checks validate ONNX loop count, QAIC compile/generate, and generated output availability; use the existing Dynamo QAIC parity helpers to compare generated tokens with the Hugging Face reference on hardware.

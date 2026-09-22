@@ -87,7 +87,7 @@ def build_dynamo_export_kwargs(export_kwargs):
     from QEfficient.utils import constants
 
     kwargs = dict(export_kwargs)
-    kwargs.setdefault("report", False)
+    kwargs.setdefault("report", True)
     kwargs.setdefault("optimize", False)
     kwargs["dynamo"] = True
     kwargs["opset_version"] = constants.ONNX_DYNAMO_EXPORT_OPSET
@@ -134,25 +134,7 @@ def convert_dynamic_axes_to_dynamic_shapes(
 
     def resolve_dim(dim_name: str):
         if dim_name not in dim_registry:
-            if dim_name == "batch_size":
-                dim_registry[dim_name] = Dim("batch_size", min=batch_min, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif dim_name == "full_batch_size":
-                # CB pool capacity; different min prevents torch.export collapsing it with batch_size.
-                dim_registry[dim_name] = Dim("full_batch_size", min=batch_min + 1, max=DYNAMO_DIM_MAX_BATCH_SIZE)
-            elif "seq_len" in dim_name:
-                dim_registry[dim_name] = Dim("seq_len", min=2, max=max_seq_len)
-            elif "comp_ctx_lengths" in dim_name:
-                dim_registry[dim_name] = Dim("comp_ctx_lengths", min=DYNAMO_DIM_MIN_COMP_CTX_LENGTHS, max=max_seq_len)
-            elif "ctx_len" in dim_name:
-                dim_registry[dim_name] = Dim("ctx_len", min=2, max=max_seq_len)
-            elif "sliding_window" in dim_name:
-                dim_registry[dim_name] = Dim(
-                    "sliding_window",
-                    min=2,
-                    max=getattr(model_config, "sliding_window", max_seq_len),
-                )
-            else:
-                dim_registry[dim_name] = Dim.DYNAMIC
+           dim_registry[dim_name] = Dim(dim_name)
         return dim_registry[dim_name]
 
     dynamic_shapes: Dict[str, Any] = {}
