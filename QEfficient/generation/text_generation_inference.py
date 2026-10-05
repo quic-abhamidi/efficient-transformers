@@ -422,6 +422,7 @@ class QEffTextGenerationBase:
         activate: bool = True,
         profiling_type: str | None = None,
         profiling_output_dir: Path | str | None = None,
+        enable_full_batch_prefill: bool = False,
     ) -> None:
         self._ctx_len = ctx_len
         self.comp_ctx_lengths_prefill = comp_ctx_lengths_prefill
@@ -458,6 +459,7 @@ class QEffTextGenerationBase:
         )  # Check and fetch full batch size if CB is enabled
         self.num_kv_blocks = num_kv_blocks
         self.kv_block_size = -(-self._ctx_len // self.num_kv_blocks) if num_kv_blocks else 1
+        self.enable_full_batch_prefill = enable_full_batch_prefill
 
         # Initialize the storage variables.
         self.batch_index = None
@@ -720,6 +722,21 @@ class QEffTextGenerationBase:
             generation_len (int): The generation length.
 
         """
+        if self._uses_full_batch_prefill():
+            prompts = [prompt_queue.popleft() for _ in range(self.full_batch_size)]
+            block_table = self.block_table if self.num_kv_blocks else None
+
+            outputs, position_ids, generation_len = self.run_prefill(
+                prompts,
+                generation_len,
+                prefill_logit_bs=self.full_batch_size,
+                decode_batch_id=np.arange(self.full_batch_size, dtype=np.int64).reshape(-1, 1),
+                block_table=block_table,
+            )
+
+            _ = self.update_decode_input(outputs, position_ids, generation_len)
+            return
+
         for decode_batch_id in range(self.full_batch_size):
             next_prompt = prompt_queue.popleft()
             block_table = self.block_table[decode_batch_id].reshape(1, -1) if self.num_kv_blocks else None
@@ -733,6 +750,20 @@ class QEffTextGenerationBase:
             )
 
             _ = self.update_decode_input(outputs, position_ids, generation_len, decode_batch_id)
+
+    def _uses_full_batch_prefill(self):
+        if not self.enable_full_batch_prefill or self.full_batch_size is None or not self._session.allowed_shapes:
+            return False
+
+        input_ids_index = self._session.binding_index_map.get("input_ids")
+        if input_ids_index is None:
+            return False
+
+        for allowed_shape in self._session.allowed_shapes:
+            shape = allowed_shape[input_ids_index][1]
+            if len(shape) >= 2 and shape[0] == self.full_batch_size and shape[1] == self._prefill_seq_len:
+                return True
+        return False
 
     def _set_output_buffers(self, batch_size: int = 1, sequence_length: int = 1):
         """
@@ -1066,6 +1097,7 @@ class TextGeneration:
         sampling_params: Optional[Dict[str, Any]] = None,
         profiling_type: str | None = None,
         profiling_output_dir: Path | str | None = None,
+        enable_full_batch_prefill: bool = False,
     ) -> None:
         self._qaic_model = QEffTextGenerationBase(
             tokenizer=tokenizer,
@@ -1084,6 +1116,7 @@ class TextGeneration:
             sampling_params=sampling_params,
             profiling_type=profiling_type,
             profiling_output_dir=profiling_output_dir,
+            enable_full_batch_prefill=enable_full_batch_prefill,
         )
         self._full_batch_size = self._qaic_model.full_batch_size
         self._num_kv_blocks = self._qaic_model.num_kv_blocks

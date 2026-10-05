@@ -375,7 +375,6 @@ class QAICInferenceSession:
         Args:
             :skipped_buffer_name: List[str]. List of buffer name to be skipped.
         """
-
         self.set_buffers({k: np.array([]) for k in skipped_buffer_names})
 
     def run(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
