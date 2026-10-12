@@ -18,7 +18,22 @@ import pytest
 
 from tests.dynamo.unit_tests import test_blocking_forward_dispatch as dynamo_dispatch
 
-_ENABLED_BLOCKING_MODES = {"h", "q", "kv", "qkv", "hq", "hkv", "hqkv", "bhqkv", "kv_headpar"}
+_ENABLED_BLOCKING_MODES = {
+    "h",
+    "q",
+    "kv",
+    "qkv",
+    "hq",
+    "hkv",
+    "hqkv",
+    "bhqkv",
+    "kv_headpar",
+    "kv_batch_fold",
+    "prefill_q",
+    "prefill_kv",
+    "prefill_qkv",
+    "prefill_online",
+}
 _ENABLED_DISPATCH_CASES = [
     case
     for case in dynamo_dispatch.DISPATCH_CASES

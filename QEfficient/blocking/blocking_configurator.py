@@ -101,6 +101,45 @@ def _get_valid_num_blocks(config: Dict, requested_key: str) -> int:
     return config.get(requested_key)
 
 
+def _infer_num_attention_heads(model_config: Any) -> int:
+    if hasattr(model_config, "text_config"):
+        model_config = model_config.text_config
+    return int(
+        require_value(
+            get_attr_or_key(model_config, ("num_attention_heads", "num_heads", "attention_heads", "n_heads")),
+            "num attention heads",
+        )
+    )
+
+
+def _infer_num_key_value_heads(model_config: Any, num_attention_heads: int) -> int:
+    if hasattr(model_config, "text_config"):
+        model_config = model_config.text_config
+    return int(get_attr_or_key(model_config, ("num_key_value_heads", "num_kv_heads", "n_kv_heads")) or num_attention_heads)
+
+
+def _resolve_prefill_online_num_cores_per_device(
+    model_config: Any, qaic_config: Dict[str, Any], compile_options: Dict[str, Any]
+) -> int | None:
+    requested_num_cores = compile_options.get("aic_num_cores")
+    if requested_num_cores is None:
+        return None
+
+    num_query_heads = _infer_num_attention_heads(model_config)
+    num_key_value_heads = _infer_num_key_value_heads(model_config, num_query_heads)
+    n_rep_chunk = int(qaic_config.get("n_rep_chunk") or 1)
+    max_num_cores = min(int(requested_num_cores), num_query_heads)
+
+    for num_cores in range(max_num_cores, num_key_value_heads - 1, -1):
+        if num_cores % num_key_value_heads != 0:
+            continue
+        if num_query_heads % num_cores != 0:
+            continue
+        if (num_query_heads // num_cores) % n_rep_chunk == 0:
+            return num_cores
+    return int(requested_num_cores)
+
+
 def block_candidates_generator(max_length: int) -> List[int]:
     block_list = []
     i = 1
@@ -423,7 +462,11 @@ def build_transformer_blocking_config_for_transform(
     if qaic_config.get("ctx_len") is None:
         blocking_config.ctx_len = ctx_len
 
-    if qaic_config.get("num_cores_per_device") is None:
+    if qaic_config.get("num_cores_per_device") is None and blocking_mode == BlockingMode.PREFILL_ONLINE:
+        blocking_config.num_cores_per_device = _resolve_prefill_online_num_cores_per_device(
+            model_config, qaic_config, compile_options
+        )
+    elif qaic_config.get("num_cores_per_device") is None:
         blocking_config.num_cores_per_device = compile_options.get("aic_num_cores")
 
     return blocking_config

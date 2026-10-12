@@ -4182,8 +4182,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             bs = max(2, bs)
         ###########################################
 
-        requested_blocking_mode = str((qaic_config or {}).get("blocking_mode", "")).lower()
-        batch_fold_export = self.continuous_batching and requested_blocking_mode == BlockingMode.KV_BATCH_FOLD.value
+        requested_blocking_mode = BlockingMode.resolve((qaic_config or {}).get("blocking_mode"))
+        batch_fold_export = self.continuous_batching and requested_blocking_mode == BlockingMode.KV_BATCH_FOLD
         if batch_fold_export:
             bs = fbs
 
@@ -4570,10 +4570,8 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
         Dict[str, Union[int, str]]
             A dictionary defining the prefill specialization.
         """
-        is_batch_fold = (
-            self.model.qaic_config is not None
-            and self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
-        )
+        blocking_mode = None if self.model.qaic_config is None else self.model.qaic_config.get("blocking_mode")
+        is_batch_fold = BlockingMode.resolve(blocking_mode) == BlockingMode.KV_BATCH_FOLD
         if not self.continuous_batching:
             exec_batch_size = batch_size
         elif is_batch_fold:
@@ -4614,7 +4612,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
                 spec["full_batch_exec_size"] = exec_batch_size
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
-            or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
+            or BlockingMode.resolve(self.model.qaic_config.get("blocking_mode")) == BlockingMode.KV_BATCH_FOLD
         ):
             num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
             spec["num_kv_blocks"] = num_kv_blocks
@@ -4689,7 +4687,7 @@ class QEFFAutoModelForCausalLM(QEFFBaseModel):
             spec["batch_size"] = kv_cache_batch_size
         if self.model.qaic_config is not None and (
             "paged" in self.model.qaic_config.get("blocking_mode", "")
-            or self.model.qaic_config.get("blocking_mode") == BlockingMode.KV_BATCH_FOLD.value
+            or BlockingMode.resolve(self.model.qaic_config.get("blocking_mode")) == BlockingMode.KV_BATCH_FOLD
         ):
             num_kv_blocks = self.model.qaic_config["num_kv_blocks"]
             spec["num_kv_blocks"] = num_kv_blocks

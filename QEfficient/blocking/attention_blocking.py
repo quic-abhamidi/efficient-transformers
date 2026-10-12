@@ -59,7 +59,7 @@ class BlockingMode(str, Enum):
     def resolve(cls, mode: Optional[str | "BlockingMode"]) -> "BlockingMode":
         if mode is None:
             return cls.NONE
-        resolved_mode = cls(mode)
+        resolved_mode = mode if isinstance(mode, cls) else cls(mode)
         if resolved_mode == cls.AUTO:
             return cls.HQKV
         return resolved_mode

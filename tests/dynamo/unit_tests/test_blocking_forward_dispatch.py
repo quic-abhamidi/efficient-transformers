@@ -382,32 +382,9 @@ DISPATCH_CASES = [
     DispatchCase(
         "qwen3_vl_moe_text",
         _make_tiny_qwen3_vl_moe_text,
-        _qaic_config("prefill_q", num_q_blocks=NUM_Q_BLOCKS),
-        BlockingMode.PREFILL_Q,
-        prefill_only=True,
-    ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config("prefill_kv", num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT),
-        BlockingMode.PREFILL_KV,
-        prefill_only=True,
-    ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config(
-            "prefill_qkv", num_q_blocks=NUM_Q_BLOCKS, num_kv_blocks=NUM_KV_BLOCKS, headpar_split=HEADPAR_SPLIT
-        ),
-        BlockingMode.PREFILL_QKV,
-        prefill_only=True,
-    ),
-    DispatchCase(
-        "qwen3_vl_moe_text",
-        _make_tiny_qwen3_vl_moe_text,
-        _qaic_config("prefill_online", num_q_blocks=NUM_Q_BLOCKS, num_kv_blocks=NUM_KV_BLOCKS, n_rep_chunk=2),
-        BlockingMode.PREFILL_ONLINE,
-        prefill_only=True,
+        _qaic_config("kv_batch_fold", num_kv_blocks=NUM_KV_BLOCKS),
+        BlockingMode.KV_BATCH_FOLD,
+        batch_size=2,
     ),
     DispatchCase(
         "kimi_k25_language",

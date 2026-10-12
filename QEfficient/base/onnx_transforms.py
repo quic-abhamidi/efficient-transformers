@@ -399,7 +399,10 @@ class PreserveNestedCacheRetainedStateTransform(BaseOnnxTransform):
 
             scatter_outputs = cls._resolve_kv_scatter_outputs(fn, node, layer_idx)
             if scatter_outputs is None:
-                continue
+                raise ValueError(
+                    f"Could not uniquely resolve nested KV scatter outputs for function '{fn.name}' "
+                    f"and layer {layer_idx}."
+                )
 
             # Expose scatter outputs in the function's output list, rename KV
             # inputs and append retained-state output names to the call node.

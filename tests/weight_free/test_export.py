@@ -108,11 +108,11 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
 
 @pytest.mark.weight_free
 @pytest.mark.weight_free_export
-@pytest.mark.parametrize("model_id_or_type,blocking_key", _BLOCKING_EXPORT_CASES)
-def test_weight_free_export_applies_causal_lm_blocking_from_qaic_config(model_id_or_type, blocking_key, tmp_export_dir):
+@pytest.mark.parametrize("model_type,blocking_key", _BLOCKING_EXPORT_CASES)
+def test_weight_free_export_applies_causal_lm_blocking_from_qaic_config(model_type, blocking_key, tmp_export_dir):
     """Direct CausalLM weight-free export honors qaic_config blocking modes."""
     use_onnx_subfunctions = True
-    model_id = WEIGHT_FREE_CAUSAL_LM_MODEL_IDS.get(model_id_or_type, model_id_or_type)
+    model_id = WEIGHT_FREE_CAUSAL_LM_MODEL_IDS[model_type]
     qaic_config = dict(WEIGHT_FREE_BLOCKING_MODE_CASES[blocking_key])
     try:
         config = load_causal_lm_config(model_id)
